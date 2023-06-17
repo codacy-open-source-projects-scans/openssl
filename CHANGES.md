@@ -25,6 +25,13 @@ OpenSSL 3.2
 
 ### Changes between 3.1 and 3.2 [xx XXX xxxx]
 
+ * TLS round-trip time calculation was added by a Brigham Young University
+   Capstone team partnering with Sandia National Laboratories. A new function
+   in ssl_lib titled SSL_get_handshake_rtt will calculate and retrieve this
+   value.
+
+   *Jairus Christensen*
+
  * Added the "-quic" option to s_client to enable connectivity to QUIC servers.
    QUIC requires the use of ALPN, so this must be specified via the "-alpn"
    option. Use of the "advanced" s_client command command via the "-adv" option
@@ -222,24 +229,13 @@ OpenSSL 3.2
 
    *Hugo Landau*
 
- * The `SSL_CERT_PATH` and `SSL_CERT_URI` environment variables are introduced.
-   `SSL_CERT_URI` can be used to specify a URI for a root certificate store. The
-   `SSL_CERT_PATH` environment variable specifies a delimiter-separated list of
-   paths which are searched for root certificates.
-
-   The existing `SSL_CERT_DIR` environment variable is deprecated.
-   `SSL_CERT_DIR` was previously used to specify either a delimiter-separated
-   list of paths or an URI, which is ambiguous. Setting `SSL_CERT_PATH` causes
-   `SSL_CERT_DIR` to be ignored for the purposes of determining root certificate
-   directories, and setting `SSL_CERT_URI` causes `SSL_CERT_DIR` to be ignored
-   for the purposes of determining root certificate stores.
-
-   *Hugo Landau*
-
  * Support for loading root certificates from the Windows certificate store
    has been added. The support is in the form of a store which recognises the
-   URI string of `org.openssl.winstore://`. This store is enabled by default and
-   can be disabled using the new compile-time option `no-winstore`.
+   URI string of `org.openssl.winstore://`. This URI scheme currently takes no
+   arguments. This store is built by default and can be disabled using the new
+   compile-time option `no-winstore`. This store is not currently used by
+   default and must be loaded explicitly using the above store URI. It is
+   expected to be loaded by default in the future.
 
    *Hugo Landau*
 
@@ -276,6 +272,30 @@ OpenSSL 3.1
 -----------
 
 ### Changes between 3.1.0 and 3.1.1 [xx XXX xxxx]
+
+ * Mitigate for the time it takes for `OBJ_obj2txt` to translate gigantic
+   OBJECT IDENTIFIER sub-identifiers to canonical numeric text form.
+
+   OBJ_obj2txt() would translate any size OBJECT IDENTIFIER to canonical
+   numeric text form.  For gigantic sub-identifiers, this would take a very
+   long time, the time complexity being O(n^2) where n is the size of that
+   sub-identifier.  ([CVE-2023-2650])
+
+   To mitigitate this, `OBJ_obj2txt()` will only translate an OBJECT
+   IDENTIFIER to canonical numeric text form if the size of that OBJECT
+   IDENTIFIER is 586 bytes or less, and fail otherwise.
+
+   The basis for this restriction is [RFC 2578 (STD 58), section 3.5]. OBJECT
+   IDENTIFIER values, which stipulates that OBJECT IDENTIFIERS may have at
+   most 128 sub-identifiers, and that the maximum value that each sub-
+   identifier may have is 2^32-1 (4294967295 decimal).
+
+   For each byte of every sub-identifier, only the 7 lower bits are part of
+   the value, so the maximum amount of bytes that an OBJECT IDENTIFIER with
+   these restrictions may occupy is 32 * 128 / 7, which is approximately 586
+   bytes.
+
+   *Richard Levitte*
 
  * Multiple algorithm implementation fixes for ARM BE platforms.
 
@@ -7426,7 +7446,7 @@ OpenSSL 1.0.1
 
  * Alternate chains certificate forgery
 
-   During certificate verfification, OpenSSL will attempt to find an
+   During certificate verification, OpenSSL will attempt to find an
    alternative certificate chain if the first attempt to build such a chain
    fails. An error in the implementation of this logic can mean that an
    attacker could cause certain checks on untrusted certificates to be
@@ -8785,7 +8805,7 @@ OpenSSL 1.0.0
 
    3. Check DSA/ECDSA signatures use DER.
 
-   Reencode DSA/ECDSA signatures and compare with the original received
+   Re-encode DSA/ECDSA signatures and compare with the original received
    signature. Return an error if there is a mismatch.
 
    This will reject various cases including garbage after signature
@@ -8832,7 +8852,7 @@ OpenSSL 1.0.0
 
  * Add additional DigestInfo checks.
 
-   Reencode DigestInto in DER and check against the original when
+   Re-encode DigestInto in DER and check against the original when
    verifying RSA signature: this will reject any improperly encoded
    DigestInfo structures.
 
@@ -19969,6 +19989,8 @@ ndif
 
 <!-- Links -->
 
+[RFC 2578 (STD 58), section 3.5]: https://datatracker.ietf.org/doc/html/rfc2578#section-3.5
+[CVE-2023-2650]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-2650
 [CVE-2023-1255]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-1255
 [CVE-2023-0466]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-0466
 [CVE-2023-0465]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-0465

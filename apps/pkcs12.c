@@ -432,7 +432,7 @@ int pkcs12_main(int argc, char **argv)
             WARN_NO_EXPORT("nomaciter");
         if (cert_pbe == -1 && maciter == -1)
             WARN_NO_EXPORT("nomac");
-        if (macsaltlen != 0)
+        if (macsaltlen != PKCS12_SALT_LEN)
             WARN_NO_EXPORT("macsaltlen");
     }
 #ifndef OPENSSL_NO_DES
@@ -899,7 +899,6 @@ int dump_certs_keys_p12(BIO *out, const PKCS12 *p12, const char *pass,
                         const EVP_CIPHER *enc)
 {
     STACK_OF(PKCS7) *asafes = NULL;
-    STACK_OF(PKCS12_SAFEBAG) *bags;
     int i, bagnid;
     int ret = 0;
     PKCS7 *p7;
@@ -907,6 +906,8 @@ int dump_certs_keys_p12(BIO *out, const PKCS12 *p12, const char *pass,
     if ((asafes = PKCS12_unpack_authsafes(p12)) == NULL)
         return 0;
     for (i = 0; i < sk_PKCS7_num(asafes); i++) {
+        STACK_OF(PKCS12_SAFEBAG) *bags;
+
         p7 = sk_PKCS7_value(asafes, i);
         bagnid = OBJ_obj2nid(p7->type);
         if (bagnid == NID_pkcs7_data) {
@@ -922,7 +923,7 @@ int dump_certs_keys_p12(BIO *out, const PKCS12 *p12, const char *pass,
         } else {
             continue;
         }
-        if (!bags)
+        if (bags == NULL)
             goto err;
         if (!dump_certs_pkeys_bags(out, bags, pass, passlen,
                                    options, pempass, enc)) {
@@ -930,7 +931,6 @@ int dump_certs_keys_p12(BIO *out, const PKCS12 *p12, const char *pass,
             goto err;
         }
         sk_PKCS12_SAFEBAG_pop_free(bags, PKCS12_SAFEBAG_free);
-        bags = NULL;
     }
     ret = 1;
 

@@ -50,14 +50,14 @@ IF[{- !$disabled{tests} -}]
           dtlsv1listentest ct_test threadstest afalgtest d2i_test \
           ssl_test_ctx_test ssl_test x509aux cipherlist_test asynciotest \
           bio_callback_test bio_memleak_test bio_core_test bio_dgram_test param_build_test \
-          bioprinttest sslapitest dtlstest sslcorrupttest \
+          bioprinttest sslapitest ssl_handshake_rtt_test dtlstest sslcorrupttest \
           bio_enc_test pkey_meth_test pkey_meth_kdf_test evp_kdf_test uitest \
           cipherbytes_test threadstest_fips threadpool_test \
           asn1_encode_test asn1_decode_test asn1_string_table_test \
           x509_time_test x509_dup_cert_test x509_check_cert_pkey_test \
           recordlentest drbgtest rand_status_test sslbuffertest \
           time_offset_test pemtest ssl_cert_table_internal_test ciphername_test \
-          http_test servername_test ocspapitest fatalerrtest tls13ccstest \
+          servername_test ocspapitest fatalerrtest tls13ccstest \
           sysdefaulttest errtest ssl_ctx_test build_wincrypt_test \
           context_internal_test aesgcmtest params_test evp_pkey_dparams_test \
           keymgmt_internal_test hexstr_test provider_status_test defltfips_test \
@@ -494,6 +494,10 @@ IF[{- !$disabled{tests} -}]
   INCLUDE[sslapitest]=../include ../apps/include ..
   DEPEND[sslapitest]=../libcrypto ../libssl libtestutil.a
 
+  SOURCE[ssl_handshake_rtt_test]=ssl_handshake_rtt_test.c helpers/ssltestlib.c
+  INCLUDE[ssl_handshake_rtt_test]=../include ../apps/include ..
+  DEPEND[ssl_handshake_rtt_test]=../libcrypto.a ../libssl.a libtestutil.a
+
   SOURCE[rpktest]=rpktest.c helpers/ssltestlib.c
   INCLUDE[rpktest]=../include ../apps/include ..
   DEPEND[rpktest]=../libcrypto ../libssl libtestutil.a
@@ -511,12 +515,14 @@ IF[{- !$disabled{tests} -}]
   DEPEND[ocspapitest]=../libcrypto libtestutil.a
 
   IF[{- !$disabled{sock} -}]
-    PROGRAMS{noinst}=http_test
-  ENDIF
+    IF[{- !$disabled{http} -}]
+      PROGRAMS{noinst}=http_test
 
-  SOURCE[http_test]=http_test.c
-  INCLUDE[http_test]=../include ../apps/include
-  DEPEND[http_test]=../libcrypto libtestutil.a
+      SOURCE[http_test]=http_test.c
+      INCLUDE[http_test]=../include ../apps/include
+      DEPEND[http_test]=../libcrypto libtestutil.a
+    ENDIF
+  ENDIF
 
   SOURCE[dtlstest]=dtlstest.c helpers/ssltestlib.c
   INCLUDE[dtlstest]=../include ../apps/include
@@ -585,10 +591,6 @@ IF[{- !$disabled{tests} -}]
   SOURCE[ciphername_test]=ciphername_test.c
   INCLUDE[ciphername_test]=../include ../apps/include
   DEPEND[ciphername_test]=../libcrypto ../libssl libtestutil.a
-
-  SOURCE[http_test]=http_test.c
-  INCLUDE[http_test]=../include ../apps/include
-  DEPEND[http_test]=../libcrypto libtestutil.a
 
   SOURCE[servername_test]=servername_test.c helpers/ssltestlib.c
   INCLUDE[servername_test]=../include ../apps/include
@@ -736,8 +738,10 @@ IF[{- !$disabled{tests} -}]
       PROGRAMS{noinst}=sm4_internal_test
     ENDIF
     IF[{- !$disabled{ec} -}]
-      PROGRAMS{noinst}=ectest ec_internal_test curve448_internal_test \
-                       evp_pkey_dhkem_test
+      PROGRAMS{noinst}=ectest ec_internal_test evp_pkey_dhkem_test
+    ENDIF
+    IF[{- !$disabled{ecx} -}]
+      PROGRAMS{noinst}=curve448_internal_test
     ENDIF
     IF[{- !$disabled{cmac} -}]
       PROGRAMS{noinst}=cmactest
@@ -883,9 +887,11 @@ IF[{- !$disabled{tests} -}]
     INCLUDE[ec_internal_test]=../include ../crypto/ec ../apps/include
     DEPEND[ec_internal_test]=../libcrypto.a libtestutil.a
 
-    SOURCE[curve448_internal_test]=curve448_internal_test.c
-    INCLUDE[curve448_internal_test]=.. ../include ../apps/include ../crypto/ec/curve448
-    DEPEND[curve448_internal_test]=../libcrypto.a libtestutil.a
+    IF[{- !$disabled{ecx} -}]
+      SOURCE[curve448_internal_test]=curve448_internal_test.c
+      INCLUDE[curve448_internal_test]=.. ../include ../apps/include ../crypto/ec/curve448
+      DEPEND[curve448_internal_test]=../libcrypto.a libtestutil.a
+    ENDIF
 
     SOURCE[rc4test]=rc4test.c
     INCLUDE[rc4test]=../include ../apps/include

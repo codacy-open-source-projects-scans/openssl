@@ -25,6 +25,14 @@ OpenSSL 3.2
 
 ### Changes between 3.1 and 3.2 [xx XXX xxxx]
 
+ * Added client side support for QUIC
+
+   *Hugo Landau*
+
+ * Added SHA256/192 algorithm support.
+
+   *Fergus Dall*
+
  * Provide a new configure option `no-http` that can be used to disable HTTP
    support.
 

@@ -284,7 +284,55 @@ OpenSSL 3.2
 OpenSSL 3.1
 -----------
 
-### Changes between 3.1.0 and 3.1.1 [xx XXX xxxx]
+### Changes between 3.1.1 and 3.1.2 [xx XXX xxxx]
+
+ * Fix DH_check() excessive time with over sized modulus
+
+   The function DH_check() performs various checks on DH parameters. One of
+   those checks confirms that the modulus ("p" parameter) is not too large.
+   Trying to use a very large modulus is slow and OpenSSL will not normally use
+   a modulus which is over 10,000 bits in length.
+
+   However the DH_check() function checks numerous aspects of the key or
+   parameters that have been supplied. Some of those checks use the supplied
+   modulus value even if it has already been found to be too large.
+
+   A new limit has been added to DH_check of 32,768 bits. Supplying a
+   key/parameters with a modulus over this size will simply cause DH_check() to
+   fail.
+
+   ([CVE-2023-3446])
+
+   *Matt Caswell*
+
+ * Do not ignore empty associated data entries with AES-SIV.
+
+   The AES-SIV algorithm allows for authentication of multiple associated
+   data entries along with the encryption. To authenticate empty data the
+   application has to call `EVP_EncryptUpdate()` (or `EVP_CipherUpdate()`)
+   with NULL pointer as the output buffer and 0 as the input buffer length.
+   The AES-SIV implementation in OpenSSL just returns success for such call
+   instead of performing the associated data authentication operation.
+   The empty data thus will not be authenticated. ([CVE-2023-2975])
+
+   Thanks to Juerg Wullschleger (Google) for discovering the issue.
+
+   The fix changes the authentication tag value and the ciphertext for
+   applications that use empty associated data entries with AES-SIV.
+   To decrypt data encrypted with previous versions of OpenSSL the application
+   has to skip calls to `EVP_DecryptUpdate()` for empty associated data
+   entries.
+
+   *Tomas Mraz*
+
+ * When building with the `enable-fips` option and using the resulting
+   FIPS provider, TLS 1.2 will, by default, mandate the use of an extended
+   master secret (FIPS 140-3 IG G.Q) and the Hash and HMAC DRBGs will
+   not operate with truncated digests (FIPS 140-3 IG G.R).
+
+   *Paul Dale*
+
+### Changes between 3.1.0 and 3.1.1 [30 May 2023]
 
  * Mitigate for the time it takes for `OBJ_obj2txt` to translate gigantic
    OBJECT IDENTIFIER sub-identifiers to canonical numeric text form.
@@ -1867,7 +1915,7 @@ breaking changes, and mappings for the large list of deprecated functions.
    3-prime RSA1536, and DSA1024 as a result of this defect would be very
    difficult to perform and are not believed likely. Attacks against DH512
    are considered just feasible. However, for an attack the target would
-   have to re-use the DH512 private key, which is not recommended anyway.
+   have to reuse the DH512 private key, which is not recommended anyway.
    Also applications directly using the low-level API BN_mod_exp may be
    affected if they use BN_FLG_CONSTTIME.
    ([CVE-2019-1551])
@@ -20002,6 +20050,8 @@ ndif
 
 <!-- Links -->
 
+[CVE-2023-3446]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-3446
+[CVE-2023-2975]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-2975
 [RFC 2578 (STD 58), section 3.5]: https://datatracker.ietf.org/doc/html/rfc2578#section-3.5
 [CVE-2023-2650]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-2650
 [CVE-2023-1255]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-1255

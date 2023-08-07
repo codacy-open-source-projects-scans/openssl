@@ -202,7 +202,7 @@ struct quic_channel_st {
      */
     uint64_t                        txku_threshold_override;
 
-    /* Valid if we are in the TERMINATING or TERMINATED states. */
+   /* Valid if we are in the TERMINATING or TERMINATED states. */
     QUIC_TERMINATE_CAUSE            terminate_cause;
 
     /*
@@ -258,7 +258,7 @@ struct quic_channel_st {
      * state of the connection's lifecycle, but more fine-grained conditions of
      * the Active state are tracked via flags below. For more details, see
      * doc/designs/quic-design/connection-state-machine.md. We are in the Open
-     * state if the state is QUIC_CSM_STATE_ACTIVE and handshake_confirmed is
+     * state if the state is QUIC_CHANNEL_STATE_ACTIVE and handshake_confirmed is
      * set.
      */
     unsigned int                    state                   : 3;
@@ -403,6 +403,9 @@ struct quic_channel_st {
 
     /* Permanent net error encountered */
     unsigned int                    net_error                           : 1;
+
+    /* Inhibit tick for testing purposes? */
+    unsigned int                    inhibit_tick                        : 1;
 
     /* Saved error stack in case permanent error was encountered */
     ERR_STATE                       *err_state;

@@ -451,21 +451,25 @@ int ossl_quic_channel_is_active(const QUIC_CHANNEL *ch)
     return ch != NULL && ch->state == QUIC_CHANNEL_STATE_ACTIVE;
 }
 
-int ossl_quic_channel_is_terminating(const QUIC_CHANNEL *ch)
+static int ossl_quic_channel_is_closing(const QUIC_CHANNEL *ch)
 {
-    if (ch->state == QUIC_CHANNEL_STATE_TERMINATING_CLOSING
-            || ch->state == QUIC_CHANNEL_STATE_TERMINATING_DRAINING)
-        return 1;
+    return ch->state == QUIC_CHANNEL_STATE_TERMINATING_CLOSING;
+}
 
-    return 0;
+static int ossl_quic_channel_is_draining(const QUIC_CHANNEL *ch)
+{
+    return ch->state == QUIC_CHANNEL_STATE_TERMINATING_DRAINING;
+}
+
+static int ossl_quic_channel_is_terminating(const QUIC_CHANNEL *ch)
+{
+    return ossl_quic_channel_is_closing(ch)
+        || ossl_quic_channel_is_draining(ch);
 }
 
 int ossl_quic_channel_is_terminated(const QUIC_CHANNEL *ch)
 {
-    if (ch->state == QUIC_CHANNEL_STATE_TERMINATED)
-        return 1;
-
-    return 0;
+    return ch->state == QUIC_CHANNEL_STATE_TERMINATED;
 }
 
 int ossl_quic_channel_is_term_any(const QUIC_CHANNEL *ch)
@@ -1631,69 +1635,76 @@ static void ch_tick(QUIC_TICK_RESULT *res, void *arg, uint32_t flags)
         }
     }
 
-    /* Handle RXKU timeouts. */
-    ch_rxku_tick(ch);
+    if (!ch->inhibit_tick) {
+        /* Handle RXKU timeouts. */
+        ch_rxku_tick(ch);
 
-    /* Handle any incoming data from network. */
-    ch_rx_pre(ch);
+        /* Handle any incoming data from network. */
+        ch_rx_pre(ch);
 
-    do {
-        /* Process queued incoming packets. */
-        ch_rx(ch);
+        do {
+            /* Process queued incoming packets. */
+            ch_rx(ch);
 
-        /*
-         * Allow the handshake layer to check for any new incoming data and generate
-         * new outgoing data.
-         */
-        ch->have_new_rx_secret = 0;
-        if (!channel_only)
-            ossl_quic_tls_tick(ch->qtls);
+            /*
+             * Allow the handshake layer to check for any new incoming data and
+             * generate new outgoing data.
+             */
+            ch->have_new_rx_secret = 0;
+            if (!channel_only)
+                ossl_quic_tls_tick(ch->qtls);
 
-        /*
-         * If the handshake layer gave us a new secret, we need to do RX again
-         * because packets that were not previously processable and were
-         * deferred might now be processable.
-         *
-         * TODO(QUIC): Consider handling this in the yield_secret callback.
-         */
-    } while (ch->have_new_rx_secret);
+            /*
+             * If the handshake layer gave us a new secret, we need to do RX
+             * again because packets that were not previously processable and
+             * were deferred might now be processable.
+             *
+             * TODO(QUIC): Consider handling this in the yield_secret callback.
+             */
+        } while (ch->have_new_rx_secret);
+    }
 
     /*
-     * Handle any timer events which are due to fire; namely, the loss detection
-     * deadline and the idle timeout.
+     * Handle any timer events which are due to fire; namely, the loss
+     * detection deadline and the idle timeout.
      *
-     * ACKM ACK generation deadline is polled by TXP, so we don't need to handle
-     * it here.
+     * ACKM ACK generation deadline is polled by TXP, so we don't need to
+     * handle it here.
      */
     now = get_time(ch);
     if (ossl_time_compare(now, ch->idle_deadline) >= 0) {
         /*
-         * Idle timeout differs from normal protocol violation because we do not
-         * send a CONN_CLOSE frame; go straight to TERMINATED.
+         * Idle timeout differs from normal protocol violation because we do
+         * not send a CONN_CLOSE frame; go straight to TERMINATED.
          */
-        ch_on_idle_timeout(ch);
+        if (!ch->inhibit_tick)
+            ch_on_idle_timeout(ch);
+
         res->net_read_desired   = 0;
         res->net_write_desired  = 0;
         res->tick_deadline      = ossl_time_infinite();
         return;
     }
 
-    deadline = ossl_ackm_get_loss_detection_deadline(ch->ackm);
-    if (!ossl_time_is_zero(deadline) && ossl_time_compare(now, deadline) >= 0)
-        ossl_ackm_on_timeout(ch->ackm);
+    if (!ch->inhibit_tick) {
+        deadline = ossl_ackm_get_loss_detection_deadline(ch->ackm);
+        if (!ossl_time_is_zero(deadline)
+            && ossl_time_compare(now, deadline) >= 0)
+            ossl_ackm_on_timeout(ch->ackm);
 
-    /* If a ping is due, inform TXP. */
-    if (ossl_time_compare(now, ch->ping_deadline) >= 0) {
-        int pn_space = ossl_quic_enc_level_to_pn_space(ch->tx_enc_level);
+        /* If a ping is due, inform TXP. */
+        if (ossl_time_compare(now, ch->ping_deadline) >= 0) {
+            int pn_space = ossl_quic_enc_level_to_pn_space(ch->tx_enc_level);
 
-        ossl_quic_tx_packetiser_schedule_ack_eliciting(ch->txp, pn_space);
+            ossl_quic_tx_packetiser_schedule_ack_eliciting(ch->txp, pn_space);
+        }
+
+        /* Write any data to the network due to be sent. */
+        ch_tx(ch);
+
+        /* Do stream GC. */
+        ossl_quic_stream_map_gc(&ch->qsm);
     }
-
-    /* Write any data to the network due to be sent. */
-    ch_tx(ch);
-
-    /* Do stream GC. */
-    ossl_quic_stream_map_gc(&ch->qsm);
 
     /* Determine the time at which we should next be ticked. */
     res->tick_deadline = ch_determine_next_tick_deadline(ch);
@@ -1772,6 +1783,7 @@ static void ch_rx_check_forged_pkt_limit(QUIC_CHANNEL *ch)
 static int ch_rx(QUIC_CHANNEL *ch)
 {
     int handled_any = 0;
+    const int closing = ossl_quic_channel_is_closing(ch);
 
     if (!ch->is_server && !ch->have_sent_any_pkt)
         /*
@@ -1785,6 +1797,11 @@ static int ch_rx(QUIC_CHANNEL *ch)
 
         if (!ossl_qrx_read_pkt(ch->qrx, &ch->qrx_pkt))
             break;
+
+        /* Track the amount of data received while in the closing state */
+        if (closing)
+            ossl_quic_tx_packetiser_record_received_closing_bytes(
+                    ch->txp, ch->qrx_pkt->hdr->len);
 
         if (!handled_any)
             ch_update_idle(ch);
@@ -1809,7 +1826,7 @@ static int ch_rx(QUIC_CHANNEL *ch)
      * When in TERMINATING - CLOSING, generate a CONN_CLOSE frame whenever we
      * process one or more incoming packets.
      */
-    if (handled_any && ch->state == QUIC_CHANNEL_STATE_TERMINATING_CLOSING)
+    if (handled_any && closing)
         ch->conn_close_queued = 1;
 
     return 1;
@@ -1847,8 +1864,12 @@ static void ch_rx_handle_packet(QUIC_CHANNEL *ch)
 
     assert(ch->qrx_pkt != NULL);
 
+    /*
+     * RFC 9000 s. 10.2.1 Closing Connection State:
+     *      An endpoint that is closing is not required to process any
+     *      received frame.
+     */
     if (!ossl_quic_channel_is_active(ch))
-        /* Do not process packets once we are terminating. */
         return;
 
     if (ossl_quic_pkt_type_is_encrypted(ch->qrx_pkt->hdr->type)) {
@@ -2005,6 +2026,18 @@ static void ch_rx_handle_packet(QUIC_CHANNEL *ch)
              * RFC 9000 s. 17.2.2: Clients that receive an Initial packet with a
              * non-zero Token Length field MUST either discard the packet or
              * generate a connection error of type PROTOCOL_VIOLATION.
+             *
+             * TODO(QUIC): consider the implications of RFC 9000 s. 10.2.3
+             * Immediate Close during the Handshake:
+             *      However, at the cost of reducing feedback about
+             *      errors for legitimate peers, some forms of denial of
+             *      service can be made more difficult for an attacker
+             *      if endpoints discard illegal packets rather than
+             *      terminating a connection with CONNECTION_CLOSE. For
+             *      this reason, endpoints MAY discard packets rather
+             *      than immediately close if errors are detected in
+             *      packets that lack authentication.
+             * I.e. should we drop this packet instead of closing the connection?
              */
             ossl_quic_channel_raise_protocol_error(ch, QUIC_ERR_PROTOCOL_VIOLATION,
                                                    0, "client received initial token");
@@ -2107,12 +2140,26 @@ static int ch_tx(QUIC_CHANNEL *ch)
 {
     QUIC_TXP_STATUS status;
 
-    if (ch->state == QUIC_CHANNEL_STATE_TERMINATING_CLOSING) {
+    /*
+     * RFC 9000 s. 10.2.2: Draining Connection State:
+     *      While otherwise identical to the closing state, an endpoint
+     *      in the draining state MUST NOT send any packets.
+     * and:
+     *      An endpoint MUST NOT send further packets.
+     */
+    if (ossl_quic_channel_is_draining(ch))
+        return 0;
+
+    if (ossl_quic_channel_is_closing(ch)) {
         /*
          * While closing, only send CONN_CLOSE if we've received more traffic
          * from the peer. Once we tell the TXP to generate CONN_CLOSE, all
          * future calls to it generate CONN_CLOSE frames, so otherwise we would
          * just constantly generate CONN_CLOSE frames.
+         *
+         * Confirming to RFC 9000 s. 10.2.1 Closing Connection State:
+         *      An endpoint SHOULD limit the rate at which it generates
+         *      packets in the closing state.
          */
         if (!ch->conn_close_queued)
             return 0;
@@ -2522,6 +2569,26 @@ int ossl_quic_channel_on_handshake_confirmed(QUIC_CHANNEL *ch)
  * Any successive calls have their termination cause data discarded;
  * once we start sending a CONNECTION_CLOSE frame, we don't change the details
  * in it.
+ *
+ * This conforms to RFC 9000 s. 10.2.1: Closing Connection State:
+ *      To minimize the state that an endpoint maintains for a closing
+ *      connection, endpoints MAY send the exact same packet in response
+ *      to any received packet.
+ *
+ * We don't drop any connection state (specifically packet protection keys)
+ * even though we are permitted to.  This conforms to RFC 9000 s. 10.2.1:
+ * Closing Connection State:
+ *       An endpoint MAY retain packet protection keys for incoming
+ *       packets to allow it to read and process a CONNECTION_CLOSE frame.
+ *
+ * Note that we do not conform to these two from the same section:
+ *      An endpoint's selected connection ID and the QUIC version
+ *      are sufficient information to identify packets for a closing
+ *      connection; the endpoint MAY discard all other connection state.
+ * and:
+ *      An endpoint MAY drop packet protection keys when entering the
+ *      closing state and send a packet containing a CONNECTION_CLOSE
+ *      frame in response to any UDP datagram that is received.
  */
 static void ch_start_terminating(QUIC_CHANNEL *ch,
                                  const QUIC_TERMINATE_CAUSE *tcause,
@@ -2540,6 +2607,11 @@ static void ch_start_terminating(QUIC_CHANNEL *ch,
         if (!force_immediate) {
             ch->state = tcause->remote ? QUIC_CHANNEL_STATE_TERMINATING_DRAINING
                                        : QUIC_CHANNEL_STATE_TERMINATING_CLOSING;
+            /*
+             * RFC 9000 s. 10.2 Immediate Close
+             *  These states SHOULD persist for at least three times
+             *  the current PTO interval as defined in [QUIC-RECOVERY].
+             */
             ch->terminate_deadline
                 = ossl_time_add(get_time(ch),
                                 ossl_time_multiply(ossl_ackm_get_pto_duration(ch->ackm),
@@ -2553,6 +2625,13 @@ static void ch_start_terminating(QUIC_CHANNEL *ch,
                 f.frame_type = ch->terminate_cause.frame_type;
                 f.is_app     = ch->terminate_cause.app;
                 ossl_quic_tx_packetiser_schedule_conn_close(ch->txp, &f);
+                /*
+                 * RFC 9000 s. 10.2.2 Draining Connection State:
+                 *  An endpoint that receives a CONNECTION_CLOSE frame MAY
+                 *  send a single packet containing a CONNECTION_CLOSE
+                 *  frame before entering the draining state, using a
+                 *  NO_ERROR code if appropriate
+                 */
                 ch->conn_close_queued = 1;
             }
         } else {
@@ -2564,6 +2643,12 @@ static void ch_start_terminating(QUIC_CHANNEL *ch,
         if (force_immediate)
             ch_on_terminating_timeout(ch);
         else if (tcause->remote)
+            /*
+             * RFC 9000 s. 10.2.2 Draining Connection State:
+             *  An endpoint MAY enter the draining state from the
+             *  closing state if it receives a CONNECTION_CLOSE frame,
+             *  which indicates that the peer is also closing or draining.
+             */
             ch->state = QUIC_CHANNEL_STATE_TERMINATING_DRAINING;
 
         break;
@@ -2824,9 +2909,20 @@ static void ch_update_idle(QUIC_CHANNEL *ch)
 {
     if (ch->max_idle_timeout == 0)
         ch->idle_deadline = ossl_time_infinite();
-    else
-        ch->idle_deadline = ossl_time_add(get_time(ch),
-            ossl_ms2time(ch->max_idle_timeout));
+    else {
+        /* RFC 9000 s. 10.1: Idle Timeout
+         *  To avoid excessively small idle timeout periods, endpoints
+         *  MUST increase the idle timeout period to be at least three
+         *  times the current Probe Timeout (PTO). This allows for
+         *  multiple PTOs to expire, and therefore multiple probes to
+         *  be sent and lost, prior to idle timeout.
+         */
+        OSSL_TIME pto = ossl_ackm_get_pto_duration(ch->ackm);
+        OSSL_TIME timeout = ossl_time_max(ossl_ms2time(ch->max_idle_timeout),
+                                          ossl_time_multiply(pto, 3));
+
+        ch->idle_deadline = ossl_time_add(get_time(ch), timeout);
+    }
 }
 
 /*
@@ -3151,4 +3247,9 @@ int ossl_quic_channel_ping(QUIC_CHANNEL *ch)
     ossl_quic_tx_packetiser_schedule_ack_eliciting(ch->txp, pn_space);
 
     return 1;
+}
+
+void ossl_quic_channel_set_inhibit_tick(QUIC_CHANNEL *ch, int inhibit)
+{
+    ch->inhibit_tick = (inhibit != 0);
 }

@@ -579,6 +579,7 @@ ossl_decoder_ctx_for_pkey_dup(OSSL_DECODER_CTX *src,
     if (process_data_dest != NULL) {
         OPENSSL_free(process_data_dest->propq);
         sk_EVP_KEYMGMT_pop_free(process_data_dest->keymgmts, EVP_KEYMGMT_free);
+        OPENSSL_free(process_data_dest);
     }
     OSSL_DECODER_CTX_free(dest);
     return NULL;
@@ -745,6 +746,10 @@ OSSL_DECODER_CTX_new_for_pkey(EVP_PKEY **pkey,
                               OSSL_LIB_CTX *libctx, const char *propquery)
 {
     OSSL_DECODER_CTX *ctx = NULL;
+    OSSL_PARAM decoder_params[] = {
+        OSSL_PARAM_END,
+        OSSL_PARAM_END
+    };
     DECODER_CACHE *cache
         = ossl_lib_ctx_get_data(libctx, OSSL_LIB_CTX_DECODER_CACHE_INDEX);
     DECODER_CACHE_ENTRY cacheent, *res, *newcache = NULL;
@@ -753,6 +758,9 @@ OSSL_DECODER_CTX_new_for_pkey(EVP_PKEY **pkey,
         ERR_raise(ERR_LIB_OSSL_DECODER, ERR_R_OSSL_DECODER_LIB);
         return NULL;
     }
+    if (propquery != NULL)
+        decoder_params[0] = OSSL_PARAM_construct_utf8_string(OSSL_DECODER_PARAM_PROPERTIES,
+                                                             (char *)propquery, 0);
 
     /* It is safe to cast away the const here */
     cacheent.input_type = (char *)input_type;
@@ -794,7 +802,9 @@ OSSL_DECODER_CTX_new_for_pkey(EVP_PKEY **pkey,
             && OSSL_DECODER_CTX_set_input_structure(ctx, input_structure)
             && OSSL_DECODER_CTX_set_selection(ctx, selection)
             && ossl_decoder_ctx_setup_for_pkey(ctx, keytype, libctx, propquery)
-            && OSSL_DECODER_CTX_add_extra(ctx, libctx, propquery)) {
+            && OSSL_DECODER_CTX_add_extra(ctx, libctx, propquery)
+            && (propquery == NULL
+                || OSSL_DECODER_CTX_set_params(ctx, decoder_params))) {
             OSSL_TRACE_BEGIN(DECODER) {
                 BIO_printf(trc_out, "(ctx %p) Got %d decoders\n",
                         (void *)ctx, OSSL_DECODER_CTX_get_num_decoders(ctx));

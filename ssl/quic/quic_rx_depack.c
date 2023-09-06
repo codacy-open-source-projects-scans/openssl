@@ -42,6 +42,7 @@ static int depack_do_frame_padding(PACKET *pkt)
 }
 
 static int depack_do_frame_ping(PACKET *pkt, QUIC_CHANNEL *ch,
+                                uint32_t enc_level,
                                 OSSL_ACKM_RX_PKT *ackm_data)
 {
     /* We ignore this frame, apart from eliciting an ACK */
@@ -53,6 +54,7 @@ static int depack_do_frame_ping(PACKET *pkt, QUIC_CHANNEL *ch,
         return 0;
     }
 
+    ossl_quic_tx_packetiser_schedule_ack_eliciting(ch->txp, enc_level);
     return 1;
 }
 
@@ -62,18 +64,26 @@ static int depack_do_frame_ack(PACKET *pkt, QUIC_CHANNEL *ch,
                                OSSL_QRX_PKT *qpacket)
 {
     OSSL_QUIC_FRAME_ACK ack;
-    OSSL_QUIC_ACK_RANGE *ack_ranges = NULL;
+    OSSL_QUIC_ACK_RANGE *p;
     uint64_t total_ranges = 0;
     uint32_t ack_delay_exp = ch->rx_ack_delay_exp;
 
     if (!ossl_quic_wire_peek_frame_ack_num_ranges(pkt, &total_ranges)
         /* In case sizeof(uint64_t) > sizeof(size_t) */
-        || total_ranges > SIZE_MAX / sizeof(ack_ranges[0])
-        || (ack_ranges = OPENSSL_zalloc(sizeof(ack_ranges[0])
-                                        * (size_t)total_ranges)) == NULL)
+        || total_ranges > SIZE_MAX / sizeof(OSSL_QUIC_ACK_RANGE))
         goto malformed;
 
-    ack.ack_ranges = ack_ranges;
+    if (ch->num_ack_range_scratch < (size_t)total_ranges) {
+        if ((p = OPENSSL_realloc(ch->ack_range_scratch,
+                                 sizeof(OSSL_QUIC_ACK_RANGE)
+                                 * (size_t)total_ranges)) == NULL)
+            goto malformed;
+
+        ch->ack_range_scratch       = p;
+        ch->num_ack_range_scratch   = (size_t)total_ranges;
+    }
+
+    ack.ack_ranges = ch->ack_range_scratch;
     ack.num_ack_ranges = (size_t)total_ranges;
 
     if (!ossl_quic_wire_decode_frame_ack(pkt, ack_delay_exp, &ack, NULL))
@@ -118,7 +128,6 @@ static int depack_do_frame_ack(PACKET *pkt, QUIC_CHANNEL *ch,
         goto malformed;
 
     ++ch->diag_num_rx_ack;
-    OPENSSL_free(ack_ranges);
     return 1;
 
 malformed:
@@ -126,7 +135,6 @@ malformed:
                                            QUIC_ERR_FRAME_ENCODING_ERROR,
                                            frame_type,
                                            "decode error");
-    OPENSSL_free(ack_ranges);
     return 0;
 }
 
@@ -1034,10 +1042,11 @@ static int depack_do_frame_handshake_done(PACKET *pkt,
 /* Main frame processor */
 
 static int depack_process_frames(QUIC_CHANNEL *ch, PACKET *pkt,
-                                 OSSL_QRX_PKT *parent_pkt, int packet_space,
+                                 OSSL_QRX_PKT *parent_pkt, uint32_t enc_level,
                                  OSSL_TIME received, OSSL_ACKM_RX_PKT *ackm_data)
 {
     uint32_t pkt_type = parent_pkt->hdr->type;
+    uint32_t packet_space = ossl_quic_enc_level_to_pn_space(enc_level);
 
     if (PACKET_remaining(pkt) == 0) {
         /*
@@ -1098,7 +1107,7 @@ static int depack_process_frames(QUIC_CHANNEL *ch, PACKET *pkt,
         switch (frame_type) {
         case OSSL_QUIC_FRAME_TYPE_PING:
             /* Allowed in all packet types */
-            if (!depack_do_frame_ping(pkt, ch, ackm_data))
+            if (!depack_do_frame_ping(pkt, ch, enc_level, ackm_data))
                 return 0;
             break;
         case OSSL_QUIC_FRAME_TYPE_PADDING:
@@ -1400,6 +1409,8 @@ int ossl_quic_handle_frames(QUIC_CHANNEL *ch, OSSL_QRX_PKT *qpacket)
 {
     PACKET pkt;
     OSSL_ACKM_RX_PKT ackm_data;
+    uint32_t enc_level;
+
     /*
      * ok has three states:
      * -1 error with ackm_data uninitialized
@@ -1419,30 +1430,22 @@ int ossl_quic_handle_frames(QUIC_CHANNEL *ch, OSSL_QRX_PKT *qpacket)
      */
     ackm_data.pkt_num = qpacket->pn;
     ackm_data.time = qpacket->time;
-    switch (qpacket->hdr->type) {
-    case QUIC_PKT_TYPE_INITIAL:
-        ackm_data.pkt_space = QUIC_PN_SPACE_INITIAL;
-        break;
-    case QUIC_PKT_TYPE_HANDSHAKE:
-        ackm_data.pkt_space = QUIC_PN_SPACE_HANDSHAKE;
-        break;
-    case QUIC_PKT_TYPE_0RTT:
-    case QUIC_PKT_TYPE_1RTT:
-        ackm_data.pkt_space = QUIC_PN_SPACE_APP;
-        break;
-    default:
+    enc_level = ossl_quic_pkt_type_to_enc_level(qpacket->hdr->type);
+    if (enc_level >= QUIC_ENC_LEVEL_NUM)
         /*
          * Retry and Version Negotiation packets should not be passed to this
          * function.
          */
         goto end;
-    }
-    ok = 0;                      /* Still assume the worst */
+
+    ok = 0; /* Still assume the worst */
+    ackm_data.pkt_space = ossl_quic_enc_level_to_pn_space(enc_level);
 
     /* Now that special cases are out of the way, parse frames */
     if (!PACKET_buf_init(&pkt, qpacket->hdr->data, qpacket->hdr->len)
         || !depack_process_frames(ch, &pkt, qpacket,
-                                  ackm_data.pkt_space, qpacket->time,
+                                  enc_level,
+                                  qpacket->time,
                                   &ackm_data))
         goto end;
 

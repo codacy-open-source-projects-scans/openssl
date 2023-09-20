@@ -99,6 +99,14 @@ OSSL_DEPRECATEDIN_3_0 int OSSL_STORE_vctrl(OSSL_STORE_CTX *ctx, int cmd,
 OSSL_STORE_INFO *OSSL_STORE_load(OSSL_STORE_CTX *ctx);
 
 /*
+ * Deletes the object in the store by URI.
+ * Returns 1 on success, 0 otherwise.
+ */
+int OSSL_STORE_delete(const char *uri, OSSL_LIB_CTX *libctx, const char *propq,
+                      const UI_METHOD *ui_method, void *ui_data,
+                      const OSSL_PARAM params[]);
+
+/*
  * Check if end of data (end of file) is reached
  * Returns 1 on end, 0 otherwise.
  */
@@ -345,7 +353,7 @@ int OSSL_STORE_LOADER_set_close(OSSL_STORE_LOADER *loader,
 OSSL_DEPRECATEDIN_3_0
 const ENGINE *OSSL_STORE_LOADER_get0_engine(const OSSL_STORE_LOADER *loader);
 OSSL_DEPRECATEDIN_3_0
-const char * OSSL_STORE_LOADER_get0_scheme(const OSSL_STORE_LOADER *loader);
+const char *OSSL_STORE_LOADER_get0_scheme(const OSSL_STORE_LOADER *loader);
 OSSL_DEPRECATEDIN_3_0
 int OSSL_STORE_register_loader(OSSL_STORE_LOADER *loader);
 OSSL_DEPRECATEDIN_3_0

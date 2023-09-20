@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -312,7 +312,7 @@ static int do_test(int use_thread_assist, int use_fake_time, int use_inject)
 
                 ++idle_units_done;
                 ossl_quic_conn_force_assist_thread_wake(c_ssl);
-                OSSL_sleep(1); /* Ensure CPU scheduling for test purposes */
+                OSSL_sleep(100); /* Ensure CPU scheduling for test purposes */
             } else {
                 c_done_idle_test = 1;
             }

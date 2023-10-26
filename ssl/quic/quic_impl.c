@@ -545,8 +545,8 @@ void ossl_quic_free(SSL *s)
 
     ossl_quic_channel_free(ctx.qc->ch);
 
-    BIO_free(ctx.qc->net_rbio);
-    BIO_free(ctx.qc->net_wbio);
+    BIO_free_all(ctx.qc->net_rbio);
+    BIO_free_all(ctx.qc->net_wbio);
 
     /* Note: SSL_free calls OPENSSL_free(qc) for us */
 
@@ -876,7 +876,7 @@ void ossl_quic_conn_set0_net_rbio(SSL *s, BIO *net_rbio)
     if (!ossl_quic_channel_set_net_rbio(ctx.qc->ch, net_rbio))
         return;
 
-    BIO_free(ctx.qc->net_rbio);
+    BIO_free_all(ctx.qc->net_rbio);
     ctx.qc->net_rbio = net_rbio;
 
     if (net_rbio != NULL)
@@ -903,7 +903,7 @@ void ossl_quic_conn_set0_net_wbio(SSL *s, BIO *net_wbio)
     if (!ossl_quic_channel_set_net_wbio(ctx.qc->ch, net_wbio))
         return;
 
-    BIO_free(ctx.qc->net_wbio);
+    BIO_free_all(ctx.qc->net_wbio);
     ctx.qc->net_wbio = net_wbio;
 
     if (net_wbio != NULL)
@@ -1532,7 +1532,9 @@ static int ensure_channel_started(QCTX *ctx)
 
 #if !defined(OPENSSL_NO_QUIC_THREAD_ASSIST)
         if (qc->is_thread_assisted)
-            if (!ossl_quic_thread_assist_init_start(&qc->thread_assist, qc->ch)) {
+            if (!ossl_quic_thread_assist_init_start(&qc->thread_assist, qc->ch,
+                                                    qc->override_now_cb,
+                                                    qc->override_now_cb_arg)) {
                 QUIC_RAISE_NON_NORMAL_ERROR(ctx, ERR_R_INTERNAL_ERROR,
                                             "failed to start assist thread");
                 return 0;
@@ -1834,6 +1836,7 @@ static int qc_wait_for_default_xso_for_read(QCTX *ctx)
     QUIC_STREAM *qs;
     int res;
     struct quic_wait_for_stream_args wargs;
+    OSSL_RTT_INFO rtt_info;
 
     /*
      * If default stream functionality is disabled or we already detached
@@ -1888,8 +1891,15 @@ static int qc_wait_for_default_xso_for_read(QCTX *ctx)
     }
 
     /*
-     * We now have qs != NULL. Make it the default stream, creating the
-     * necessary XSO.
+     * We now have qs != NULL. Remove it from the incoming stream queue so that
+     * it isn't also returned by any future SSL_accept_stream calls.
+     */
+    ossl_statm_get_rtt_info(ossl_quic_channel_get_statm(qc->ch), &rtt_info);
+    ossl_quic_stream_map_remove_from_accept_queue(ossl_quic_channel_get_qsm(qc->ch),
+                                                  qs, rtt_info.smoothed_rtt);
+
+    /*
+     * Now make qs the default stream, creating the necessary XSO.
      */
     qc_set_default_xso(qc, create_xso_from_stream(qc, qs), /*touch=*/0);
     if (qc->default_xso == NULL)
@@ -3431,6 +3441,7 @@ int ossl_quic_get_conn_close_info(SSL *ssl,
         return 0;
 
     info->error_code    = tc->error_code;
+    info->frame_type    = tc->frame_type;
     info->reason        = tc->reason;
     info->reason_len    = tc->reason_len;
     info->flags         = 0;
@@ -3559,6 +3570,27 @@ int ossl_quic_num_ciphers(void)
 const SSL_CIPHER *ossl_quic_get_cipher(unsigned int u)
 {
     return NULL;
+}
+
+/*
+ * SSL_get_shutdown()
+ * ------------------
+ */
+int ossl_quic_get_shutdown(const SSL *s)
+{
+    QCTX ctx;
+    int shut = 0;
+
+    if (!expect_quic_conn_only(s, &ctx))
+        return 0;
+
+    if (ossl_quic_channel_is_term_any(ctx.qc->ch)) {
+        shut |= SSL_SENT_SHUTDOWN;
+        if (!ossl_quic_channel_is_closing(ctx.qc->ch))
+            shut |= SSL_RECEIVED_SHUTDOWN;
+    }
+
+    return shut;
 }
 
 /*

@@ -746,10 +746,8 @@ static int helper_init(struct helper *h, int free_order, int blocking,
         BIO_set_data(h->s_qtf_wbio, h->qtf);
     }
 
-    if (!need_injector)
-        h->s_net_bio_own = NULL;
-
-    h->s_qtf_wbio_own   = NULL;
+    h->s_net_bio_own = NULL;
+    h->s_qtf_wbio_own = NULL;
 
     h->c_fd = BIO_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, 0);
     if (!TEST_int_ge(h->c_fd, 0))
@@ -1055,7 +1053,7 @@ static int run_script_worker(struct helper *h, const struct script_op *script,
             first           = 0;
             offset          = 0;
             op_start_time   = ossl_time_now();
-            op_deadline     = ossl_time_add(op_start_time, ossl_ms2time(8000));
+            op_deadline     = ossl_time_add(op_start_time, ossl_ms2time(60000));
         }
 
         if (!TEST_int_le(ossl_time_compare(ossl_time_now(), op_deadline), 0)) {
@@ -1642,8 +1640,10 @@ static int run_script_worker(struct helper *h, const struct script_op *script,
                     || !TEST_int_eq(expect_remote,
                                     (cc_info.flags
                                      & SSL_CONN_CLOSE_FLAG_LOCAL) == 0)
-                    || !TEST_uint64_t_eq(error_code, cc_info.error_code))
+                    || !TEST_uint64_t_eq(error_code, cc_info.error_code)) {
+                    TEST_info("Connection close reason: %s", cc_info.reason);
                     goto out;
+                }
             }
             break;
 
@@ -1945,6 +1945,8 @@ out:
     s_unlock(h, hl); /* idempotent */
     if (!testresult) {
         size_t i;
+        const QUIC_TERMINATE_CAUSE *tcause;
+        const char *e_str, *f_str;
 
         TEST_error("failed in script \"%s\" at op %zu, thread %d\n",
                    script_name, op_idx + 1, thread_idx);
@@ -1954,6 +1956,56 @@ out:
                       repeat_stack_done[i],
                       repeat_stack_limit[i],
                       repeat_stack_idx[i]);
+
+        ERR_print_errors_fp(stderr);
+
+        if (h->c_conn != NULL) {
+            SSL_CONN_CLOSE_INFO cc_info = {0};
+
+            if (SSL_get_conn_close_info(h->c_conn, &cc_info, sizeof(cc_info))) {
+                e_str = ossl_quic_err_to_string(cc_info.error_code);
+                f_str = ossl_quic_frame_type_to_string(cc_info.frame_type);
+
+                if (e_str == NULL)
+                    e_str = "?";
+                if (f_str == NULL)
+                    f_str = "?";
+
+                TEST_info("client side is closed: %llu(%s)/%llu(%s), "
+                          "%s, %s, reason: \"%s\"",
+                          (unsigned long long)cc_info.error_code,
+                          e_str,
+                          (unsigned long long)cc_info.frame_type,
+                          f_str,
+                          (cc_info.flags & SSL_CONN_CLOSE_FLAG_LOCAL) != 0
+                            ? "local" : "remote",
+                          (cc_info.flags & SSL_CONN_CLOSE_FLAG_TRANSPORT) != 0
+                            ? "transport" : "app",
+                          cc_info.reason != NULL ? cc_info.reason : "-");
+            }
+        }
+
+        tcause = (h->s != NULL
+                  ? ossl_quic_tserver_get_terminate_cause(h->s) : NULL);
+        if (tcause != NULL) {
+            e_str = ossl_quic_err_to_string(tcause->error_code);
+            f_str = ossl_quic_frame_type_to_string(tcause->frame_type);
+
+            if (e_str == NULL)
+                e_str = "?";
+            if (f_str == NULL)
+                f_str = "?";
+
+            TEST_info("server side is closed: %llu(%s)/%llu(%s), "
+                     "%s, %s, reason: \"%s\"",
+                      (unsigned long long)tcause->error_code,
+                      e_str,
+                      (unsigned long long)tcause->frame_type,
+                      f_str,
+                      tcause->remote ? "remote" : "local",
+                      tcause->app ? "app" : "transport",
+                      tcause->reason != NULL ? tcause->reason : "-");
+        }
     }
 
     OPENSSL_free(tmp_buf);
@@ -4904,6 +4956,87 @@ static const struct script_op script_76[] = {
     OP_END
 };
 
+/* 77. Ensure default stream popping operates correctly */
+static const struct script_op script_77[] = {
+    OP_C_SET_ALPN           ("ossltest")
+    OP_C_CONNECT_WAIT       ()
+
+    OP_C_SET_INCOMING_STREAM_POLICY(SSL_INCOMING_STREAM_POLICY_ACCEPT)
+
+    OP_S_NEW_STREAM_BIDI    (a, S_BIDI_ID(0))
+    OP_S_WRITE              (a, "Strawberry", 10)
+
+    OP_C_READ_EXPECT        (DEFAULT, "Strawberry", 10)
+
+    OP_S_NEW_STREAM_BIDI    (b, S_BIDI_ID(1))
+    OP_S_WRITE              (b, "xyz", 3)
+
+    OP_C_ACCEPT_STREAM_WAIT (b)
+    OP_C_READ_EXPECT        (b, "xyz", 3)
+
+    OP_END
+};
+
+/* 78. Post-connection session ticket handling */
+static size_t new_session_count;
+
+static int on_new_session(SSL *s, SSL_SESSION *sess)
+{
+    ++new_session_count;
+    return 0; /* do not ref session, we aren't keeping it */
+}
+
+static int setup_session(struct helper *h, struct helper_local *hl)
+{
+    SSL_CTX_set_session_cache_mode(h->c_ctx, SSL_SESS_CACHE_BOTH);
+    SSL_CTX_sess_set_new_cb(h->c_ctx, on_new_session);
+    return 1;
+}
+
+static int trigger_late_session_ticket(struct helper *h, struct helper_local *hl)
+{
+    new_session_count = 0;
+
+    if (!TEST_true(ossl_quic_tserver_new_ticket(ACQUIRE_S())))
+        return 0;
+
+    return 1;
+}
+
+static int check_got_session_ticket(struct helper *h, struct helper_local *hl)
+{
+    if (!TEST_size_t_gt(new_session_count, 0))
+        return 0;
+
+    return 1;
+}
+
+static const struct script_op script_78[] = {
+    OP_C_SET_ALPN           ("ossltest")
+    OP_CHECK                (setup_session, 0)
+    OP_C_CONNECT_WAIT       ()
+
+    OP_C_SET_DEFAULT_STREAM_MODE(SSL_DEFAULT_STREAM_MODE_NONE)
+
+    OP_C_NEW_STREAM_BIDI    (a, C_BIDI_ID(0))
+    OP_C_WRITE              (a, "apple", 5)
+
+    OP_S_BIND_STREAM_ID     (a, C_BIDI_ID(0))
+    OP_S_READ_EXPECT        (a, "apple", 5)
+
+    OP_S_WRITE              (a, "orange", 6)
+    OP_C_READ_EXPECT        (a, "orange", 6)
+
+    OP_CHECK                (trigger_late_session_ticket, 0)
+
+    OP_S_WRITE              (a, "Strawberry", 10)
+    OP_C_READ_EXPECT        (a, "Strawberry", 10)
+
+    OP_CHECK                (check_got_session_ticket, 0)
+
+    OP_END
+};
+
 static const struct script_op *const scripts[] = {
     script_1,
     script_2,
@@ -4980,7 +5113,9 @@ static const struct script_op *const scripts[] = {
     script_73,
     script_74,
     script_75,
-    script_76
+    script_76,
+    script_77,
+    script_78
 };
 
 static int test_script(int idx)

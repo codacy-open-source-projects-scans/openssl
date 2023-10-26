@@ -159,8 +159,8 @@ void ossl_quic_tserver_free(QUIC_TSERVER *srv)
         return;
 
     ossl_quic_channel_free(srv->ch);
-    BIO_free(srv->args.net_rbio);
-    BIO_free(srv->args.net_wbio);
+    BIO_free_all(srv->args.net_rbio);
+    BIO_free_all(srv->args.net_wbio);
     OPENSSL_free(srv->ssl);
     SSL_free(srv->tls);
     SSL_CTX_free(srv->ctx);
@@ -508,7 +508,7 @@ int ossl_quic_tserver_shutdown(QUIC_TSERVER *srv, uint64_t app_error_code)
 {
     ossl_quic_channel_local_close(srv->ch, app_error_code, NULL);
 
-    /* TODO(QUIC): !SSL_SHUTDOWN_FLAG_NO_STREAM_FLUSH */
+    /* TODO(QUIC SERVER): !SSL_SHUTDOWN_FLAG_NO_STREAM_FLUSH */
 
     if (ossl_quic_channel_is_terminated(srv->ch))
         return 1;

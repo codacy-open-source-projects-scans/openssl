@@ -25,6 +25,21 @@ OpenSSL 3.2
 
 ### Changes between 3.1 and 3.2 [xx XXX xxxx]
 
+ * Enable extra Arm64 optimization on Windows for GHASH, RAND and AES.
+
+   *Evgeny Karpov*
+
+ * Added a function to delete objects from store by URI - OSSL_STORE_delete()
+   and the corresponding provider-storemgmt API function
+   OSSL_FUNC_store_delete().
+
+   *Dmitry Belyavskiy*
+
+ * Added OSSL_FUNC_store_open_ex() provider-storemgmt API function to pass
+   a passphrase callback when opening a store.
+
+   *Simo Sorce*
+
  * Changed the default salt length used by PBES2 KDF's (PBKDF2 and scrypt)
    from 8 bytes to 16 bytes.
    The PKCS5 (RFC 8018) standard uses a 64 bit salt length for PBE, and
@@ -455,7 +470,15 @@ OpenSSL 3.2
 OpenSSL 3.1
 -----------
 
-### Changes between 3.1.2 and 3.1.3 [xx XXX xxxx]
+### Changes between 3.1.3 and 3.1.4 [xx XXX xxxx]
+
+* Fix incorrect key and IV resizing issues when calling EVP_EncryptInit_ex2(),
+   EVP_DecryptInit_ex2() or EVP_CipherInit_ex2() with OSSL_PARAM parameters
+   that alter the key or IV length ([CVE-2023-5363]).
+
+   *Paul Dale*
+
+### Changes between 3.1.2 and 3.1.3 [19 Sep 2023]
 
  * Fix POLY1305 MAC implementation corrupting XMM registers on Windows.
 
@@ -20273,6 +20296,7 @@ ndif
 
 <!-- Links -->
 
+[CVE-2023-5363]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-5363
 [CVE-2023-4807]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-4807
 [CVE-2023-3817]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-3817
 [CVE-2023-3446]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-3446

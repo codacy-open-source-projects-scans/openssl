@@ -30,7 +30,7 @@ OpenSSL 3.3
 
  * The EVP_PKEY_fromdata function has been augmented to allow for the derivation
    of CRT (Chinese Remainder Theorem) parameters when requested.  See the
-   OSSL_PKEY_PARAM_DERIVE_FROM_PQ param in the EVP_PKEY-RSA documentation.
+   OSSL_PKEY_PARAM_RSA_DERIVE_FROM_PQ param in the EVP_PKEY-RSA documentation.
 
    *Neil Horman*
 
@@ -84,6 +84,30 @@ OpenSSL 3.3
 
  * New API `SSL_write_ex2`, which can be used to send an end-of-stream (FIN)
    condition in an optimised way when using QUIC.
+
+   *Hugo Landau*
+
+ * New atexit configuration switch, which controls whether the OPENSSL_cleanup
+   is registered when libcrypto is unloaded. This is turned off on NonStop
+   configurations because of loader differences on that platform compared to
+   Linux.
+
+   *Randall S. Becker*
+
+ * Support for qlog for tracing QUIC connections has been added.
+
+   The qlog output from OpenSSL currently uses a pre-standard draft version of
+   qlog. The output from OpenSSL will change in incompatible ways in future
+   releases, and is not subject to any format stability or compatibility
+   guarantees at this time; therefore this functionality must currently be
+   enabled with the build-time option `enable-unstable-qlog`. See the
+   openssl-qlog(7) manpage for details.
+
+   *Hugo Landau*
+
+ * Added APIs to allow configuring the negotiated idle timeout for QUIC
+   connections, and to allow determining the number of additional streams
+   that can currently be created for a QUIC connection.
 
    *Hugo Landau*
 
@@ -160,6 +184,13 @@ OpenSSL 3.2
 
    *Rohan McLure*
 
+ * Disable building QUIC server utility when OpenSSL is configured with
+   `no-apps`.
+
+   *Vitalii Koshura*
+
+### Changes between 3.1 and 3.2.0 [23 Nov 2023]
+
  * Fix excessive time spent in DH check / generation with large Q parameter
    value.
 
@@ -173,13 +204,6 @@ OpenSSL 3.2
    ([CVE-2023-5678])
 
    *Richard Levitte*
-
- * Disable building QUIC server utility when OpenSSL is configured with
-   `no-apps`.
-
-   *Vitalii Koshura*
-
-### Changes between 3.1 and 3.2.0 [23 Nov 2023]
 
  * The BLAKE2b hash algorithm supports a configurable output length
    by setting the "size" parameter.

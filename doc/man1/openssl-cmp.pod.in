@@ -1044,7 +1044,7 @@ If the transaction contains more requests, the remaining ones are not saved.
 =item B<-reqout_only> I<filename>
 
 Save the first CMP requests created by the client to the given file and exit.
-Any options related to CMP servers and their reponses are ignored.
+Any options related to CMP servers and their responses are ignored.
 
 This option is useful for supporting offline scenarios where the certificate
 request (or any other CMP request) is produced beforehand and sent out later.
@@ -1442,7 +1442,7 @@ The B<-profile> option was added in OpenSSL 3.3.
 
 =head1 COPYRIGHT
 
-Copyright 2007-2023 The OpenSSL Project Authors. All Rights Reserved.
+Copyright 2007-2024 The OpenSSL Project Authors. All Rights Reserved.
 
 Licensed under the Apache License 2.0 (the "License").  You may not use
 this file except in compliance with the License.  You can obtain a copy

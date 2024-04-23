@@ -36,6 +36,17 @@ OpenSSL 3.4
 
    *Stephan Wurm*
 
+ * The X25519 and X448 key exchange implementation in the FIPS provider
+   is unapproved and has `fips=no` property.
+
+   * Tomas Mraz*
+
+ * Use an empty renegotiate extension in TLS client hellos instead of
+   the empty renegotiation SCSV, for all connections with a minimum TLS
+   version > 1.0.
+
+   *Tim Perry*
+
 OpenSSL 3.3
 -----------
 

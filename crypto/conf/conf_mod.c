@@ -466,6 +466,7 @@ static int module_init(CONF_MODULE *pmod, const char *name, const char *value,
 
     if (!sk_CONF_IMODULE_push(new_modules, imod)) {
         ossl_rcu_write_unlock(module_list_lock);
+        sk_CONF_IMODULE_free(new_modules);
         ERR_raise(ERR_LIB_CONF, ERR_R_CRYPTO_LIB);
         goto err;
     }

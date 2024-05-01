@@ -70,6 +70,7 @@ OSSL_ENCODER_CLEANUP                    datatype
 OSSL_ENCODER_INSTANCE                   datatype
 OSSL_HTTP_bio_cb_t                      datatype
 OSSL_HTTP_REQ_CTX                       datatype
+OSSL_IETF_ATTR_SYNTAX                   datatype
 OSSL_ITEM                               datatype
 OSSL_LIB_CTX                            datatype
 OSSL_PARAM                              datatype
@@ -416,6 +417,7 @@ OPENSSL_clear_free                      define
 OPENSSL_clear_realloc                   define
 OPENSSL_free                            define
 OPENSSL_malloc                          define
+OPENSSL_aligned_alloc                   define
 OPENSSL_malloc_init                     define
 OPENSSL_mem_debug_pop                   define deprecated 3.0.0
 OPENSSL_mem_debug_push                  define deprecated 3.0.0

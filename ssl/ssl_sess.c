@@ -287,6 +287,7 @@ const unsigned char *SSL_SESSION_get_id(const SSL_SESSION *s, unsigned int *len)
         *len = (unsigned int)s->session_id_length;
     return s->session_id;
 }
+
 const unsigned char *SSL_SESSION_get0_id_context(const SSL_SESSION *s,
                                                 unsigned int *len)
 {
@@ -907,8 +908,9 @@ int SSL_SESSION_set1_id(SSL_SESSION *s, const unsigned char *sid,
       return 0;
     }
     s->session_id_length = sid_len;
-    if (sid != s->session_id)
+    if (sid != s->session_id && sid_len > 0)
         memcpy(s->session_id, sid, sid_len);
+
     return 1;
 }
 

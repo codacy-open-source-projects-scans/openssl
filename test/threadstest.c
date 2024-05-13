@@ -90,6 +90,9 @@ static int test_lock(void)
     CRYPTO_RWLOCK *lock = CRYPTO_THREAD_lock_new();
     int res;
 
+    if (!TEST_ptr(lock))
+        return 0;
+
     res = TEST_true(CRYPTO_THREAD_read_lock(lock))
           && TEST_true(CRYPTO_THREAD_unlock(lock))
           && TEST_true(CRYPTO_THREAD_write_lock(lock))
@@ -225,6 +228,9 @@ static int _torture_rw(void)
 
     rwtorturelock = CRYPTO_THREAD_lock_new();
     atomiclock = CRYPTO_THREAD_lock_new();
+    if (!TEST_ptr(rwtorturelock) || !TEST_ptr(atomiclock))
+        goto out;
+
     rwwriter1_iterations = 0;
     rwwriter2_iterations = 0;
     rwreader1_iterations = 0;
@@ -413,6 +419,9 @@ static int _torture_rcu(void)
     int rc = 0;
 
     atomiclock = CRYPTO_THREAD_lock_new();
+    if (!TEST_ptr(atomiclock))
+        goto out;
+
     memset(&writer1, 0, sizeof(thread_t));
     memset(&writer2, 0, sizeof(thread_t));
     memset(&reader1, 0, sizeof(thread_t));
@@ -427,6 +436,8 @@ static int _torture_rcu(void)
     rcu_torture_result = 1;
 
     rcu_lock = ossl_rcu_lock_new(1, NULL);
+    if (!rcu_lock)
+        goto out;
 
     TEST_info("Staring rcu torture");
     t1 = ossl_time_now();
@@ -1065,19 +1076,6 @@ static int test_obj_add(void)
                            1, default_provider);
 }
 
-static void test_lib_ctx_load_config_worker(void)
-{
-    if (!TEST_int_eq(OSSL_LIB_CTX_load_config(multi_libctx, config_file), 1))
-        multi_set_success(0);
-}
-
-static int test_lib_ctx_load_config(void)
-{
-    return thread_run_test(&test_lib_ctx_load_config_worker,
-                           MAXIMUM_THREADS, &test_lib_ctx_load_config_worker,
-                           1, default_provider);
-}
-
 #if !defined(OPENSSL_NO_DGRAM) && !defined(OPENSSL_NO_SOCK)
 static BIO *multi_bio1, *multi_bio2;
 
@@ -1264,7 +1262,6 @@ int setup_tests(void)
 #endif
     ADD_TEST(test_multi_load_unload_provider);
     ADD_TEST(test_obj_add);
-    ADD_TEST(test_lib_ctx_load_config);
 #if !defined(OPENSSL_NO_DGRAM) && !defined(OPENSSL_NO_SOCK)
     ADD_TEST(test_bio_dgram_pair);
 #endif

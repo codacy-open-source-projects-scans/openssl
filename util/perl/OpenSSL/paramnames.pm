@@ -43,6 +43,13 @@ my %params = (
     'PROV_PARAM_DSA_SIGN_DISABLED' =>      "dsa-sign-disabled",      # uint
     'PROV_PARAM_TDES_ENCRYPT_DISABLED' =>  "tdes-encrypt-disabled",  # uint
     'PROV_PARAM_RSA_SIGN_X931_PAD_DISABLED' =>  "rsa-sign-x931-pad-disabled",   # uint
+    'PROV_PARAM_HKDF_KEY_CHECK' =>         "hkdf-key-check",         # uint
+    'PROV_PARAM_TLS13_KDF_KEY_CHECK' =>    "tls13-kdf-key-check",    # uint
+    'PROV_PARAM_TLS1_PRF_KEY_CHECK' =>     "tls1-prf-key-check",     # uint
+    'PROV_PARAM_SSHKDF_KEY_CHECK' =>       "sshkdf-key-check",       # uint
+    'PROV_PARAM_SSKDF_KEY_CHECK' =>        "sskdf-key-check",        # uint
+    'PROV_PARAM_X963KDF_KEY_CHECK' =>      "x963kdf-key-check",      # uint
+    'PROV_PARAM_PBKDF2_LOWER_BOUND_CHECK' => "pbkdf2-lower-bound-check", # uint
 
 # Self test callback parameters
     'PROV_PARAM_SELF_TEST_PHASE' =>  "st-phase",# utf8_string
@@ -111,6 +118,7 @@ my %params = (
     'CIPHER_PARAM_RC2_KEYBITS' =>          "keybits",     # size_t
     'CIPHER_PARAM_SPEED' =>                "speed",       # uint
     'CIPHER_PARAM_CTS_MODE' =>             "cts_mode",    # utf8_string
+    'CIPHER_PARAM_DECRYPT_ONLY' =>         "decrypt-only",  # int, 0 or 1
     'CIPHER_PARAM_FIPS_ENCRYPT_CHECK' =>   "encrypt-check", # int
     'CIPHER_PARAM_FIPS_APPROVED_INDICATOR' => '*ALG_PARAM_FIPS_APPROVED_INDICATOR',
 # For passing the AlgorithmIdentifier parameter in DER form
@@ -207,6 +215,7 @@ my %params = (
     'KDF_PARAM_ARGON2_VERSION' => "version",                # uint32_t
     'KDF_PARAM_FIPS_EMS_CHECK' => "ems_check",              # int
     'KDF_PARAM_FIPS_DIGEST_CHECK' => '*PKEY_PARAM_FIPS_DIGEST_CHECK',
+    'KDF_PARAM_FIPS_KEY_CHECK' => '*PKEY_PARAM_FIPS_KEY_CHECK',
     'KDF_PARAM_FIPS_APPROVED_INDICATOR' => '*ALG_PARAM_FIPS_APPROVED_INDICATOR',
 
 # Known RAND names

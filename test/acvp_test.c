@@ -46,6 +46,8 @@ static OSSL_PROVIDER *prov_null = NULL;
 static OSSL_LIB_CTX *libctx = NULL;
 static SELF_TEST_ARGS self_test_args = { 0 };
 static OSSL_CALLBACK self_test_events;
+static int pass_sig_gen_params = 1;
+static int rsa_sign_x931_pad_allowed = 1;
 #ifndef OPENSSL_NO_DSA
 static int dsasign_allowed = 1;
 #endif
@@ -96,12 +98,13 @@ static int sig_gen(EVP_PKEY *pkey, OSSL_PARAM *params, const char *digest_name,
     unsigned char *sig = NULL;
     size_t sig_len;
     size_t sz = EVP_PKEY_get_size(pkey);
+    OSSL_PARAM *p = pass_sig_gen_params ? params : NULL;
 
     sig_len = sz;
     if (!TEST_ptr(sig = OPENSSL_malloc(sz))
         || !TEST_ptr(md_ctx = EVP_MD_CTX_new())
         || !TEST_int_eq(EVP_DigestSignInit_ex(md_ctx, NULL, digest_name, libctx,
-                                              NULL, pkey, NULL), 1)
+                                              NULL, pkey, p), 1)
         || !TEST_int_gt(EVP_DigestSign(md_ctx, sig, &sig_len, msg, msg_len), 0))
         goto err;
     *sig_out = sig;
@@ -347,7 +350,7 @@ static EVP_PKEY *dsa_paramgen(int L, int N)
         || !TEST_true(EVP_PKEY_CTX_set_dsa_paramgen_bits(paramgen_ctx, L))
         || !TEST_true(EVP_PKEY_CTX_set_dsa_paramgen_q_bits(paramgen_ctx, N))
         || !TEST_true(EVP_PKEY_paramgen(paramgen_ctx, &param_key)))
-        return NULL;
+        TEST_info("dsa_paramgen failed");
     EVP_PKEY_CTX_free(paramgen_ctx);
     return param_key;
 }
@@ -378,6 +381,10 @@ static int dsa_keygen_test(int id)
     size_t priv_len = 0, pub_len = 0;
     const struct dsa_paramgen_st *tst = &dsa_keygen_data[id];
 
+    if (!dsasign_allowed) {
+        TEST_info("DSA keygen test skipped: DSA signing is not allowed");
+        return 1;
+    }
     if (!TEST_ptr(param_key = dsa_paramgen(tst->L, tst->N))
         || !TEST_ptr(keygen_ctx = EVP_PKEY_CTX_new_from_pkey(libctx, param_key,
                                                              NULL))
@@ -421,23 +428,31 @@ static int dsa_paramgen_test(int id)
     if (!TEST_ptr(paramgen_ctx = EVP_PKEY_CTX_new_from_name(libctx, "DSA", NULL))
         || !TEST_int_gt(EVP_PKEY_paramgen_init(paramgen_ctx), 0)
         || !TEST_true(EVP_PKEY_CTX_set_dsa_paramgen_bits(paramgen_ctx, tst->L))
-        || !TEST_true(EVP_PKEY_CTX_set_dsa_paramgen_q_bits(paramgen_ctx, tst->N))
-        || !TEST_true(EVP_PKEY_paramgen(paramgen_ctx, &param_key))
-        || !TEST_true(pkey_get_bn_bytes(param_key, OSSL_PKEY_PARAM_FFC_P,
-                                        &p, &plen))
-        || !TEST_true(pkey_get_bn_bytes(param_key, OSSL_PKEY_PARAM_FFC_Q,
-                                        &q, &qlen))
-        || !TEST_true(pkey_get_octet_bytes(param_key, OSSL_PKEY_PARAM_FFC_SEED,
-                                           &seed, &seedlen))
-        || !TEST_true(EVP_PKEY_get_int_param(param_key,
-                                             OSSL_PKEY_PARAM_FFC_PCOUNTER,
-                                             &counter)))
+        || !TEST_true(EVP_PKEY_CTX_set_dsa_paramgen_q_bits(paramgen_ctx,
+                                                           tst->N)))
         goto err;
 
-    test_output_memory("p", p, plen);
-    test_output_memory("q", q, qlen);
-    test_output_memory("domainSeed", seed, seedlen);
-    test_printf_stderr("%s: %d\n", "counter", counter);
+    if (!dsasign_allowed) {
+        if (!TEST_false(EVP_PKEY_paramgen(paramgen_ctx, &param_key)))
+            goto err;
+    } else {
+        if (!TEST_true(EVP_PKEY_paramgen(paramgen_ctx, &param_key))
+            || !TEST_true(pkey_get_bn_bytes(param_key, OSSL_PKEY_PARAM_FFC_P,
+                                            &p, &plen))
+            || !TEST_true(pkey_get_bn_bytes(param_key, OSSL_PKEY_PARAM_FFC_Q,
+                                            &q, &qlen))
+            || !TEST_true(pkey_get_octet_bytes(param_key,
+                                               OSSL_PKEY_PARAM_FFC_SEED,
+                                               &seed, &seedlen))
+            || !TEST_true(EVP_PKEY_get_int_param(param_key,
+                                                 OSSL_PKEY_PARAM_FFC_PCOUNTER,
+                                                 &counter)))
+            goto err;
+        test_output_memory("p", p, plen);
+        test_output_memory("q", q, qlen);
+        test_output_memory("domainSeed", seed, seedlen);
+        test_printf_stderr("%s: %d\n", "counter", counter);
+    }
     ret = 1;
 err:
     OPENSSL_free(p);
@@ -597,10 +612,12 @@ static int dsa_siggen_test(int id)
     size_t sig_len = 0, rlen = 0, slen = 0;
     const struct dsa_siggen_st *tst = &dsa_siggen_data[id];
 
-    if (!TEST_ptr(pkey = dsa_keygen(tst->L, tst->N)))
-        goto err;
-
-    if (dsasign_allowed) {
+    if (!dsasign_allowed) {
+        if (!TEST_ptr_null(pkey = dsa_keygen(tst->L, tst->N)))
+            goto err;
+    } else {
+        if (!TEST_ptr(pkey = dsa_keygen(tst->L, tst->N)))
+            goto err;
         if (!TEST_true(sig_gen(pkey, NULL, tst->digest_alg, tst->msg, tst->msg_len,
                                &sig, &sig_len))
             || !TEST_true(get_dsa_sig_rs_bytes(sig, sig_len, &r, &s, &rlen, &slen)))
@@ -812,13 +829,14 @@ static int aes_gcm_enc_dec(const char *alg,
                            const unsigned char *aad, size_t aad_len,
                            const unsigned char *ct, size_t ct_len,
                            const unsigned char *tag, size_t tag_len,
-                           int enc, int pass)
+                           int enc, int pass,
+                           unsigned char *out, int *out_len,
+                           unsigned char *outiv)
 {
     int ret = 0;
     EVP_CIPHER_CTX *ctx;
     EVP_CIPHER *cipher = NULL;
-    int out_len, len;
-    unsigned char out[1024];
+    int olen, len;
 
     TEST_note("%s : %s : expected to %s", alg, enc ? "encrypt" : "decrypt",
               pass ? "pass" : "fail");
@@ -836,9 +854,9 @@ static int aes_gcm_enc_dec(const char *alg,
             goto err;
     }
     /*
-     * For testing purposes the IV it being set here. In a compliant application
-     * the IV would be generated internally. A fake entropy source could also
-     * be used to feed in the random IV bytes (see fake_random.c)
+     * For testing purposes the IV may be passed in here. In a compliant
+     * application the IV would be generated internally. A fake entropy source
+     * could also be used to feed in the random IV bytes (see fake_random.c)
      */
     if (!TEST_true(EVP_CipherInit_ex(ctx, NULL, NULL, key, iv, enc))
         || !TEST_true(EVP_CIPHER_CTX_set_padding(ctx, 0))
@@ -846,23 +864,46 @@ static int aes_gcm_enc_dec(const char *alg,
         || !TEST_true(EVP_CipherUpdate(ctx, out, &len, pt, pt_len)))
         goto err;
 
-    if (!TEST_int_eq(EVP_CipherFinal_ex(ctx, out + len, &out_len), pass))
+    if (!TEST_int_eq(EVP_CipherFinal_ex(ctx, out + len, &olen), pass))
         goto err;
     if (!pass) {
         ret = 1;
         goto err;
     }
-    out_len += len;
+    olen += len;
     if (enc) {
-        if (!TEST_mem_eq(out, out_len, ct, ct_len)
-            || !TEST_int_gt(EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG,
-                                              tag_len, out + out_len), 0)
-            || !TEST_mem_eq(out + out_len, tag_len, tag, tag_len))
-                    goto err;
+        if ((ct != NULL && !TEST_mem_eq(out, olen, ct, ct_len))
+                || !TEST_int_gt(EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG,
+                                                    tag_len, out + olen), 0)
+                || (tag != NULL
+                    && !TEST_mem_eq(out + olen, tag_len, tag, tag_len)))
+            goto err;
     } else {
-        if (!TEST_mem_eq(out, out_len, ct, ct_len))
+        if (ct != NULL && !TEST_mem_eq(out, olen, ct, ct_len))
             goto err;
     }
+
+    {
+        OSSL_PARAM params[] = { OSSL_PARAM_END, OSSL_PARAM_END, OSSL_PARAM_END };
+        OSSL_PARAM *p = params;
+        unsigned int iv_generated = -1;
+        const OSSL_PARAM *gettables = EVP_CIPHER_CTX_gettable_params(ctx);
+        const char *ivgenkey = OSSL_CIPHER_PARAM_AEAD_IV_GENERATED;
+        int ivgen = (OSSL_PARAM_locate_const(gettables, ivgenkey) != NULL);
+
+        if (ivgen != 0)
+            *p++ = OSSL_PARAM_construct_uint(ivgenkey, &iv_generated);
+        if (outiv != NULL)
+            *p = OSSL_PARAM_construct_octet_string(OSSL_CIPHER_PARAM_IV,
+                                                   outiv, iv_len);
+        if (!TEST_true(EVP_CIPHER_CTX_get_params(ctx, params)))
+            goto err;
+        if (ivgen != 0
+                && !TEST_uint_eq(iv_generated, (enc == 0 || iv != NULL ? 0 : 1)))
+            goto err;
+    }
+    if (out_len != NULL)
+        *out_len = olen;
 
     ret = 1;
 err:
@@ -876,23 +917,45 @@ static int aes_gcm_enc_dec_test(int id)
     const struct cipher_gcm_st *tst = &aes_gcm_enc_data[id];
     int enc = 1;
     int pass = 1;
+    unsigned char out[1024];
 
     return aes_gcm_enc_dec(tst->alg, tst->pt, tst->pt_len,
                            tst->key, tst->key_len,
                            tst->iv, tst->iv_len, tst->aad, tst->aad_len,
                            tst->ct, tst->ct_len, tst->tag, tst->tag_len,
-                           enc, pass)
+                           enc, pass, out, NULL, NULL)
             && aes_gcm_enc_dec(tst->alg, tst->ct, tst->ct_len,
                                tst->key, tst->key_len,
                                tst->iv, tst->iv_len, tst->aad, tst->aad_len,
                                tst->pt, tst->pt_len, tst->tag, tst->tag_len,
-                               !enc, pass)
+                               !enc, pass, out, NULL, NULL)
             /* Fail if incorrect tag passed to decrypt */
             && aes_gcm_enc_dec(tst->alg, tst->ct, tst->ct_len,
                                tst->key, tst->key_len,
                                tst->iv, tst->iv_len, tst->aad, tst->aad_len,
                                tst->pt, tst->pt_len, tst->aad, tst->tag_len,
-                               !enc, !pass);
+                               !enc, !pass, out, NULL, NULL);
+}
+
+static int aes_gcm_gen_iv_internal_test(void)
+{
+    const struct cipher_gcm_st *tst = &aes_gcm_enc_data[0];
+    int enc = 1;
+    int pass = 1;
+    int out_len = 0;
+    unsigned char out[1024];
+    unsigned char iv[16];
+
+    return aes_gcm_enc_dec(tst->alg, tst->pt, tst->pt_len,
+                           tst->key, tst->key_len,
+                           NULL, tst->iv_len, tst->aad, tst->aad_len,
+                           NULL, tst->ct_len, NULL, tst->tag_len,
+                           enc, pass, out, &out_len, iv)
+            && aes_gcm_enc_dec(tst->alg, out, out_len,
+                               tst->key, tst->key_len,
+                               iv, tst->iv_len, tst->aad, tst->aad_len,
+                               tst->pt, tst->pt_len, out + out_len, tst->tag_len,
+                               !enc, pass, out, NULL, NULL);
 }
 
 #ifndef OPENSSL_NO_DH
@@ -1169,6 +1232,12 @@ static int rsa_siggen_test(int id)
     OSSL_PARAM params[4], *p;
     const struct rsa_siggen_st *tst = &rsa_siggen_data[id];
     int salt_len = tst->pss_salt_len;
+
+    if (!rsa_sign_x931_pad_allowed
+            && (strcmp(tst->sig_pad_mode, OSSL_PKEY_RSA_PAD_MODE_X931) == 0)) {
+        TEST_info("RSA x931 signature generation skipped: x931 signing is not allowed");
+        return 1;
+    }
 
     TEST_note("RSA %s signature generation", tst->sig_pad_mode);
 
@@ -1469,7 +1538,11 @@ int setup_tests(void)
     ADD_ALL_TESTS(cipher_enc_dec_test, OSSL_NELEM(cipher_enc_data));
     ADD_ALL_TESTS(aes_ccm_enc_dec_test, OSSL_NELEM(aes_ccm_enc_data));
     ADD_ALL_TESTS(aes_gcm_enc_dec_test, OSSL_NELEM(aes_gcm_enc_data));
+    if (fips_provider_version_ge(libctx, 3, 4, 0))
+        ADD_TEST(aes_gcm_gen_iv_internal_test);
 
+    pass_sig_gen_params = fips_provider_version_ge(libctx, 3, 4, 0);
+    rsa_sign_x931_pad_allowed = fips_provider_version_lt(libctx, 3, 4, 0);
     ADD_ALL_TESTS(rsa_keygen_test, OSSL_NELEM(rsa_keygen_data));
     ADD_ALL_TESTS(rsa_siggen_test, OSSL_NELEM(rsa_siggen_data));
     ADD_ALL_TESTS(rsa_sigver_test, OSSL_NELEM(rsa_sigver_data));

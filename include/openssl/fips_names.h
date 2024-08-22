@@ -67,7 +67,23 @@ extern "C" {
  * This is enabled by default.
  * Type: OSSL_PARAM_UTF8_STRING
  */
-#define OSSL_PROV_FIPS_PARAM_NO_SHORT_MAC "no-short-mac"
+# define OSSL_PROV_FIPS_PARAM_NO_SHORT_MAC "no-short-mac"
+
+/*
+ * A boolean that determines if the runtime FIPS key check for HMAC is
+ * performed.
+ * This is enabled by default.
+ * Type: OSSL_PARAM_UTF8_STRING
+ */
+# define OSSL_PROV_FIPS_PARAM_HMAC_KEY_CHECK "hmac-key-check"
+
+/*
+ * A boolean that determines if the runtime FIPS key check for KMAC is
+ * performed.
+ * This is enabled by default.
+ * Type: OSSL_PARAM_UTF8_STRING
+ */
+# define OSSL_PROV_FIPS_PARAM_KMAC_KEY_CHECK "kmac-key-check"
 
 /*
  * A boolean that determines if truncated digests can be used with Hash and HMAC
@@ -77,6 +93,14 @@ extern "C" {
  * Type: OSSL_PARAM_UTF8_STRING
  */
 # define OSSL_PROV_FIPS_PARAM_DRBG_TRUNC_DIGEST "drbg-no-trunc-md"
+
+/*
+ * A boolean that determines if the digest algorithm used as part of a
+ * signature algorithm is in the approved list.
+ * This is disabled by default.
+ * Type: OSSL_PARAM_UTF8_STRING
+ */
+# define OSSL_PROV_FIPS_PARAM_SIGNATURE_DIGEST_CHECK "signature-digest-check"
 
 /*
  * A boolean that determines if the runtime FIPS digest check for HKDF is
@@ -142,6 +166,24 @@ extern "C" {
 # define OSSL_PROV_FIPS_PARAM_TDES_ENCRYPT_DISABLED "tdes-encrypt-disabled"
 
 /*
+ * A boolean that determines if PKCS#1 v1.5 padding is allowed for key
+ * agreement and transport operations.
+ * See SP800-131A r2 for further information.
+ * This is disabled by default.
+ * Type: OSSL_PARAM_UTF8_STRING
+ */
+# define OSSL_PROV_FIPS_PARAM_RSA_PKCS15_PADDING_DISABLED \
+            "rsa-pkcs15-padding-disabled"
+
+/*
+ * A boolean that determines if the runtime salt length check for RSA-PSS is
+ * performed.
+ * This is disabled by default.
+ * Type: OSSL_PARAM_UTF8_STRING
+ */
+# define OSSL_PROV_FIPS_PARAM_RSA_PSS_SALTLEN_CHECK "rsa-pss-saltlen-check"
+
+/*
  * A boolean that determines if X9.31 padding can be used for RSA signing.
  * X9.31 RSA has been removed from FIPS 186-5, and is no longer approved for
  * signing. it may still be used for verification for legacy purposes.
@@ -157,6 +199,14 @@ extern "C" {
  * Type: OSSL_PARAM_UTF8_STRING
  */
 # define OSSL_PROV_FIPS_PARAM_HKDF_KEY_CHECK "hkdf-key-check"
+
+/*
+ * A boolean that determines if the runtime FIPS key check for KBKDF is
+ * performed.
+ * This is disabled by default.
+ * Type: OSSL_PARAM_UTF8_STRING
+ */
+# define OSSL_PROV_FIPS_PARAM_KBKDF_KEY_CHECK "kbkdf-key-check"
 
 /*
  * A boolean that determines if the runtime FIPS key check for TLS13 KDF is
@@ -205,6 +255,14 @@ extern "C" {
  * Type: OSSL_PARAM_UTF8_STRING
  */
 # define OSSL_PROV_FIPS_PARAM_PBKDF2_LOWER_BOUND_CHECK "pbkdf2-lower-bound-check"
+
+/*
+ * A boolean that determines if the runtime cofactor check for ECDH is
+ * performed.
+ * This is disabled by default.
+ * Type: OSSL_PARAM_UTF8_STRING
+ */
+# define OSSL_PROV_FIPS_PARAM_ECDH_COFACTOR_CHECK "ecdh-cofactor-check"
 
 # ifdef __cplusplus
 }

@@ -30,7 +30,6 @@
 #include "prov/implementations.h"
 #include "prov/provider_ctx.h"
 #include "prov/securitycheck.h"
-#include "prov/fipsindicator.h"
 #include "crypto/ec.h"
 #include "prov/der_ec.h"
 
@@ -104,6 +103,14 @@ typedef struct {
      */
     unsigned int kattest;
 #endif
+#ifdef FIPS_MODULE
+    /*
+     * FIPS 140-3 IG 2.4.B mandates that verification based on a digest of a
+     * message is not permitted.  However, signing based on a digest is still
+     * permitted.
+     */
+    int verify_message;
+#endif
     /* If this is set then the generated k is not random */
     unsigned int nonce_type;
     OSSL_FIPS_IND_DECLARE
@@ -122,6 +129,9 @@ static void *ecdsa_newctx(void *provctx, const char *propq)
 
     OSSL_FIPS_IND_INIT(ctx)
     ctx->flag_allow_md = 1;
+#ifdef FIPS_MODULE
+    ctx->verify_message = 1;
+#endif
     ctx->libctx = PROV_LIBCTX_OF(provctx);
     if (propq != NULL && (ctx->propq = OPENSSL_strdup(propq)) == NULL) {
         OPENSSL_free(ctx);
@@ -130,12 +140,10 @@ static void *ecdsa_newctx(void *provctx, const char *propq)
     return ctx;
 }
 
-static int ecdsa_signverify_init(void *vctx, void *ec,
+static int ecdsa_signverify_init(PROV_ECDSA_CTX *ctx, void *ec,
                                  const OSSL_PARAM params[], int operation,
                                  const char *desc)
 {
-    PROV_ECDSA_CTX *ctx = (PROV_ECDSA_CTX *)vctx;
-
     if (!ossl_prov_is_running()
             || ctx == NULL)
         return 0;
@@ -169,13 +177,23 @@ static int ecdsa_signverify_init(void *vctx, void *ec,
 
 static int ecdsa_sign_init(void *vctx, void *ec, const OSSL_PARAM params[])
 {
-    return ecdsa_signverify_init(vctx, ec, params, EVP_PKEY_OP_SIGN,
+    PROV_ECDSA_CTX *ctx = (PROV_ECDSA_CTX *)vctx;
+
+#ifdef FIPS_MODULE
+    ctx->verify_message = 1;
+#endif
+    return ecdsa_signverify_init(ctx, ec, params, EVP_PKEY_OP_SIGN,
                                  "ECDSA Sign Init");
 }
 
 static int ecdsa_verify_init(void *vctx, void *ec, const OSSL_PARAM params[])
 {
-    return ecdsa_signverify_init(vctx, ec, params, EVP_PKEY_OP_VERIFY,
+    PROV_ECDSA_CTX *ctx = (PROV_ECDSA_CTX *)vctx;
+
+#ifdef FIPS_MODULE
+    ctx->verify_message = 0;
+#endif
+    return ecdsa_signverify_init(ctx, ec, params, EVP_PKEY_OP_VERIFY,
                                  "ECDSA Verify Init");
 }
 
@@ -271,7 +289,7 @@ static int ecdsa_setup_md(PROV_ECDSA_CTX *ctx, const char *mdname,
         goto err;
     }
     /* XOF digests don't work */
-    if ((EVP_MD_get_flags(md) & EVP_MD_FLAG_XOF) != 0) {
+    if (EVP_MD_xof(md)) {
         ERR_raise(ERR_LIB_PROV, PROV_R_XOF_DIGESTS_NOT_ALLOWED);
         goto err;
     }
@@ -283,7 +301,7 @@ static int ecdsa_setup_md(PROV_ECDSA_CTX *ctx, const char *mdname,
         if (!ossl_fips_ind_digest_sign_check(OSSL_FIPS_IND_GET(ctx),
                                              OSSL_FIPS_IND_SETTABLE1, ctx->libctx,
                                              md_nid, sha1_allowed, desc,
-                                             &FIPS_fips_signature_digest_check))
+                                             ossl_fips_config_signature_digest_check))
             goto err;
     }
 #endif
@@ -330,7 +348,10 @@ static int ecdsa_digest_signverify_init(void *vctx, const char *mdname,
     if (!ossl_prov_is_running())
         return 0;
 
-    if (!ecdsa_signverify_init(vctx, ec, params, operation, desc)
+#ifdef FIPS_MODULE
+    ctx->verify_message = 1;
+#endif
+    if (!ecdsa_signverify_init(ctx, ec, params, operation, desc)
         || !ecdsa_setup_md(ctx, mdname, NULL, desc))
         return 0;
 
@@ -505,6 +526,13 @@ static int ecdsa_get_ctx_params(void *vctx, OSSL_PARAM *params)
     p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_NONCE_TYPE);
     if (p != NULL && !OSSL_PARAM_set_uint(p, ctx->nonce_type))
         return 0;
+
+#ifdef FIPS_MODULE
+    p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_FIPS_VERIFY_MESSAGE);
+    if (p != NULL && !OSSL_PARAM_set_uint(p, ctx->verify_message))
+        return 0;
+#endif
+
     if (!OSSL_FIPS_IND_GET_CTX_PARAM(ctx, params))
         return 0;
     return 1;
@@ -515,6 +543,9 @@ static const OSSL_PARAM known_gettable_ctx_params[] = {
     OSSL_PARAM_size_t(OSSL_SIGNATURE_PARAM_DIGEST_SIZE, NULL),
     OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_DIGEST, NULL, 0),
     OSSL_PARAM_uint(OSSL_SIGNATURE_PARAM_NONCE_TYPE, NULL),
+#ifdef FIPS_MODULE
+    OSSL_PARAM_uint(OSSL_SIGNATURE_PARAM_FIPS_VERIFY_MESSAGE, NULL),
+#endif
     OSSL_FIPS_IND_GETTABLE_CTX_PARAM()
     OSSL_PARAM_END
 };
@@ -538,10 +569,10 @@ static int ecdsa_set_ctx_params(void *vctx, const OSSL_PARAM params[])
 
     if (!OSSL_FIPS_IND_SET_CTX_PARAM(ctx, OSSL_FIPS_IND_SETTABLE0, params,
                                      OSSL_SIGNATURE_PARAM_FIPS_KEY_CHECK))
-        return  0;
+        return 0;
     if (!OSSL_FIPS_IND_SET_CTX_PARAM(ctx, OSSL_FIPS_IND_SETTABLE1, params,
                                      OSSL_SIGNATURE_PARAM_FIPS_DIGEST_CHECK))
-        return  0;
+        return 0;
 
 #if !defined(OPENSSL_NO_ACVP_TESTS)
     p = OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_KAT);

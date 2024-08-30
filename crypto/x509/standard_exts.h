@@ -39,6 +39,7 @@ static const X509V3_EXT_METHOD *standard_exts[] = {
 #endif
     &ossl_v3_sxnet,
     &ossl_v3_info,
+    &ossl_v3_audit_identity,
 #ifndef OPENSSL_NO_RFC3779
     &ossl_v3_addr,
     &ossl_v3_asid,
@@ -83,6 +84,7 @@ static const X509V3_EXT_METHOD *standard_exts[] = {
     &ossl_v3_acc_priv_policies,
     &ossl_v3_indirect_issuer,
     &ossl_v3_no_assertion,
+    &ossl_v3_issued_on_behalf_of,
     &ossl_v3_single_use,
     &ossl_v3_group_ac,
     &ossl_v3_holder_name_constraints,

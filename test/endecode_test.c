@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2023 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2020-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -1341,9 +1341,7 @@ int setup_tests(void)
     }
 
     /* FIPS(3.0.0): provider imports explicit params but they won't work #17998 */
-    is_fips_3_0_0 = fips_provider_version_eq(testctx, 3, 0, 0);
-    if (is_fips_3_0_0 < 0)
-        return 0;
+    is_fips_3_0_0 = is_fips && fips_provider_version_eq(testctx, 3, 0, 0);
 
 #ifdef STATIC_LEGACY
     /*

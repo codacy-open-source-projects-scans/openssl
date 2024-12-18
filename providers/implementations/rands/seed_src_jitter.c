@@ -17,8 +17,10 @@
 #include <openssl/err.h>
 #include <openssl/randerr.h>
 #include <openssl/proverr.h>
+#include <openssl/self_test.h>
 #include "prov/implementations.h"
 #include "prov/provider_ctx.h"
+#include "prov/providercommon.h"
 #include "crypto/rand.h"
 #include "crypto/rand_pool.h"
 
@@ -98,10 +100,12 @@ static size_t get_jitter_random_value(PROV_JITTER *s,
 
         /*
          * Permanent Failure
-         * https://github.com/smuellerDD/jitterentropy-library/issues/118
+         * https://github.com/smuellerDD/jitterentropy-library/blob/master/doc/jitterentropy.3#L234
          */
-        if (result < -5)
+        if (result < -5) {
+            ossl_set_error_state(OSSL_SELF_TEST_TYPE_CRNG);
             break;
+        }
 
         /* Success */
         if (result >= 0 && (size_t)result == len)
@@ -193,8 +197,13 @@ static int jitter_generate(void *vseed, unsigned char *out, size_t outlen,
     /* Get entropy from jitter entropy library. */
     entropy_available = ossl_prov_acquire_entropy_from_jitter(s, pool);
 
-    if (entropy_available > 0)
+    if (entropy_available > 0) {
+        if (!ossl_rand_pool_adin_mix_in(pool, adin, adin_len)) {
+            ossl_rand_pool_free(pool);
+            return 0;
+        }
         memcpy(out, ossl_rand_pool_buffer(pool), ossl_rand_pool_length(pool));
+    }
 
     ossl_rand_pool_free(pool);
     return entropy_available > 0;
@@ -263,7 +272,6 @@ static size_t jitter_get_seed(void *vseed, unsigned char **pout,
 {
     size_t ret = 0;
     size_t entropy_available = 0;
-    size_t i;
     RAND_POOL *pool;
     PROV_JITTER *s = (PROV_JITTER *)vseed;
 
@@ -276,13 +284,10 @@ static size_t jitter_get_seed(void *vseed, unsigned char **pout,
     /* Get entropy from jitter entropy library. */
     entropy_available = ossl_prov_acquire_entropy_from_jitter(s, pool);
 
-    if (entropy_available > 0) {
+    if (entropy_available > 0
+        && ossl_rand_pool_adin_mix_in(pool, adin, adin_len)) {
         ret = ossl_rand_pool_length(pool);
         *pout = ossl_rand_pool_detach(pool);
-
-        /* xor the additional data into the output */
-        for (i = 0; i < adin_len; ++i)
-            (*pout)[i % ret] ^= adin[i];
     } else {
         ERR_raise(ERR_LIB_PROV, PROV_R_ENTROPY_SOURCE_STRENGTH_TOO_WEAK);
     }

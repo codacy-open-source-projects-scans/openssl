@@ -25,10 +25,30 @@ OpenSSL Releases
  - [OpenSSL 1.0.0](#openssl-100)
  - [OpenSSL 0.9.x](#openssl-09x)
 
-OpenSSL 3.4
+OpenSSL 3.5
 -----------
 
 ### Changes between 3.4 and 3.5 [xx XXX xxxx]
+
+* All the BIO_meth_get_*() functions allowing reuse of the internal OpenSSL
+  BIO method implementations were deprecated. The reuse is unsafe due to
+  dependency on the code of the internal methods not changing.
+
+  *Tomáš Mráz*
+
+* Support DEFAULT keyword and '-' prefix in SSL_CTX_set1_groups_list().
+  SSL_CTX_set1_groups_list() now supports the DEFAULT keyword which sets the
+  available groups to the default selection. The '-' prefix allows the calling
+  application to remove a group from the selection.
+
+  *Frederik Wedel-Heinen*
+
+ * Updated the default encryption cipher for the `req`, `cms`, and `smime` applications
+   from `des-ede3-cbc` to `aes-256-cbc`.
+
+   AES-256 provides a stronger 256-bit key encryption than legacy 3DES.
+
+   *Aditya*
 
  * Enhanced PKCS#7 inner contents verification.
    In the PKCS7_verify() function, the BIO *indata parameter refers to the
@@ -43,6 +63,13 @@ OpenSSL 3.4
 
    *Małgorzata Olszówka*
 
+ * The `-rawin` option of the `pkeyutl` command is now implied (and thus no
+   longer required) when using `-digest` or when signing or verifying with an
+   Ed25519 or Ed448 key.
+   The `-digest` and `-rawin` option may only be given with `-sign` or `verify`.
+
+   *David von Oheimb*
+
  * Optionally allow the FIPS provider to use the `JITTER` entropy source.
    Note that using this option will require the resulting FIPS provider
    to undergo entropy source validation [ESV] by the [CMVP], without this
@@ -51,10 +78,35 @@ OpenSSL 3.4
 
    *Paul Dale*
 
+ * Extended `OPENSSL_ia32cap` support to accommodate additional `CPUID`
+   feature/capability bits in leaf `0x7` (Extended Feature Flags) as well
+   as leaf `0x24` (Converged Vector ISA).
+
+   *Dan Zimmerman, Alina Elizarova*
+
+ * Cipher pipelining support for provided ciphers with new API functions
+   EVP_CIPHER_can_pipeline(), EVP_CipherPipelineEncryptInit(),
+   EVP_CipherPipelineDecryptInit(), EVP_CipherPipelineUpdate(),
+   and EVP_CipherPipelineFinal(). Cipher pipelining support allows application to
+   submit multiple chunks of data in one cipher update call, thereby allowing the
+   provided implementation to take advantage of parallel computing. There are
+   currently no built-in ciphers that support pipelining. This new API replaces
+   the legacy pipeline API [SSL_CTX_set_max_pipelines](https://docs.openssl.org/3.3/man3/SSL_CTX_set_split_send_fragment/) used with Engines.
+
+   *Ramkumar*
+
 OpenSSL 3.4
 -----------
 
-### Changes between 3.3 and 3.4 [xx XXX xxxx]
+### Changes between 3.4.0 and 3.4.1 [xx XXX xxxx]
+
+ * Reverted the behavior change of CMS_get1_certs() and CMS_get1_crls()
+   that happened in the 3.4.0 release. These functions now return NULL
+   again if there are no certs or crls in the CMS object.
+
+   *Tomáš Mráz*
+
+### Changes between 3.3 and 3.4.0 [22 Oct 2024]
 
  * For the FIPS provider only, replaced the primary DRBG with a continuous
    health check module.  This also removes the now forbidden DRBG chaining.
@@ -150,7 +202,7 @@ OpenSSL 3.4
 
  * Added options `-not_before` and `-not_after` for explicit setting
    start and end dates of certificates created with the `req` and `x509`
-   apps. Added the same options also to `ca` app as alias for
+   commands. Added the same options also to `ca` command as alias for
    `-startdate` and `-enddate` options.
 
    *Stephan Wurm*
@@ -957,14 +1009,14 @@ OpenSSL 3.2
 
    * Lutz Jänicke*
 
- * The `x509`, `ca`, and `req` apps now produce X.509 v3 certificates.
+ * The `x509`, `ca`, and `req` commands now produce X.509 v3 certificates.
    The `-x509v1` option of `req` prefers generation of X.509 v1 certificates.
    `X509_sign()` and `X509_sign_ctx()` make sure that the certificate has
    X.509 version 3 if the certificate information includes X.509 extensions.
 
    *David von Oheimb*
 
- * Fix and extend certificate handling and the apps `x509`, `verify` etc.
+ * Fix and extend certificate handling and the commands `x509`, `verify` etc.
    such as adding a trace facility for debugging certificate chain building.
 
    *David von Oheimb*
@@ -1293,7 +1345,7 @@ OpenSSL 3.1
 
    *Orr Toledano*
 
- * s_client and s_server apps now explicitly say when the TLS version
+ * `s_client` and `s_server` commands now explicitly say when the TLS version
    does not include the renegotiation mechanism. This avoids confusion
    between that scenario versus when the TLS version includes secure
    renegotiation but the peer lacks support for it.
@@ -2344,7 +2396,8 @@ breaking changes, and mappings for the large list of deprecated functions.
 
    *Nicola Tuveri*
 
- * Behavior of the `pkey` app is changed, when using the `-check` or `-pubcheck`
+ * Behavior of the `pkey` command is changed,
+   when using the `-check` or `-pubcheck`
    switches: a validation failure triggers an early exit, returning a failure
    exit status to the parent process.
 
@@ -8584,7 +8637,7 @@ OpenSSL 1.0.1
    *Matt Caswell*
 
  * Fix issue where no-ssl3 configuration sets method to NULL. When openssl is
-   built with the no-ssl3 option and a SSL v3 ClientHello is received the ssl
+   built with the no-ssl3 option and an SSL v3 ClientHello is received the ssl
    method would be set to NULL which could later result in a NULL pointer
    dereference. Thanks to Frank Schmirler for reporting this issue.
    ([CVE-2014-3569])
@@ -9649,7 +9702,7 @@ OpenSSL 1.0.0
    *Matt Caswell*
 
  * Fix issue where no-ssl3 configuration sets method to NULL. When openssl is
-   built with the no-ssl3 option and a SSL v3 ClientHello is received the ssl
+   built with the no-ssl3 option and an SSL v3 ClientHello is received the ssl
    method would be set to NULL which could later result in a NULL pointer
    dereference. Thanks to Frank Schmirler for reporting this issue.
    ([CVE-2014-3569])
@@ -15780,7 +15833,7 @@ s-cbc           3624.96k     5258.21k     5530.91k     5624.30k     5628.26k
 
    *stefank@valicert.com via Richard Levitte*
 
- * Add a SSL_SESS_CACHE_NO_INTERNAL_STORE flag to take over half
+ * Add an SSL_SESS_CACHE_NO_INTERNAL_STORE flag to take over half
    the job SSL_SESS_CACHE_NO_INTERNAL_LOOKUP was inconsistently
    doing, define a new flag (SSL_SESS_CACHE_NO_INTERNAL) to be
    the bitwise-OR of the two for use by the majority of applications
@@ -16329,7 +16382,7 @@ s-cbc           3624.96k     5258.21k     5530.91k     5624.30k     5628.26k
 ### Changes between 0.9.6a and 0.9.6b  [9 Jul 2001]
 
  * Change ssleay_rand_bytes (crypto/rand/md_rand.c)
-   to avoid a SSLeay/OpenSSL PRNG weakness pointed out by
+   to avoid an SSLeay/OpenSSL PRNG weakness pointed out by
    Markku-Juhani O. Saarinen <markku-juhani.saarinen@nokia.com>:
    PRNG state recovery was possible based on the output of
    one PRNG request appropriately sized to gain knowledge on
@@ -18930,7 +18983,7 @@ s-cbc           3624.96k     5258.21k     5530.91k     5624.30k     5628.26k
 
  * Bugfix: ssl23_get_client_hello did not work properly when called in
    state SSL23_ST_SR_CLNT_HELLO_B, i.e. when the first 7 bytes of
-   a SSLv2-compatible client hello for SSLv3 or TLSv1 could be read,
+   an SSLv2-compatible client hello for SSLv3 or TLSv1 could be read,
    but a retry condition occurred while trying to read the rest.
 
    *Bodo Moeller*

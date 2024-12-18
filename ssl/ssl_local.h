@@ -820,7 +820,7 @@ struct ssl_ctx_st {
     /*
      * If this callback is not null, it will be called each time a session id
      * is added to the cache.  If this function returns 1, it means that the
-     * callback will do a SSL_SESSION_free() when it has finished using it.
+     * callback will do an SSL_SESSION_free() when it has finished using it.
      * Otherwise, on 0, it means the callback has finished with it. If
      * remove_session_cb is not null, it will be called when a session-id is
      * removed from the cache.  After the call, OpenSSL will
@@ -1206,6 +1206,13 @@ struct ssl_st {
 struct ssl_connection_st {
     /* type identifier and common data */
     struct ssl_st ssl;
+
+    /*
+     * The actual end user's SSL object. Could be different to this one for
+     * QUIC
+     */
+    SSL *user_ssl;
+
     /*
      * protocol version (one of SSL2_VERSION, SSL3_VERSION, TLS1_VERSION,
      * DTLS1_VERSION)
@@ -1813,6 +1820,7 @@ struct ssl_connection_st {
     SSL_CONNECTION_FROM_SSL_ONLY_int(ssl, const)
 # define SSL_CONNECTION_GET_CTX(sc) ((sc)->ssl.ctx)
 # define SSL_CONNECTION_GET_SSL(sc) (&(sc)->ssl)
+# define SSL_CONNECTION_GET_USER_SSL(sc) ((sc)->user_ssl)
 # ifndef OPENSSL_NO_QUIC
 #  include "quic/quic_local.h"
 #  define SSL_CONNECTION_FROM_SSL_int(ssl, c)                      \
@@ -2473,7 +2481,8 @@ static ossl_inline void tls1_get_peer_groups(SSL_CONNECTION *s,
 
 __owur int ossl_ssl_init(SSL *ssl, SSL_CTX *ctx, const SSL_METHOD *method,
                          int type);
-__owur SSL *ossl_ssl_connection_new_int(SSL_CTX *ctx, const SSL_METHOD *method);
+__owur SSL *ossl_ssl_connection_new_int(SSL_CTX *ctx, SSL *user_ssl,
+                                        const SSL_METHOD *method);
 __owur SSL *ossl_ssl_connection_new(SSL_CTX *ctx);
 void ossl_ssl_connection_free(SSL *ssl);
 __owur int ossl_ssl_connection_reset(SSL *ssl);

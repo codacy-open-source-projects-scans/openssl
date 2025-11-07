@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2024 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2025 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -323,8 +323,10 @@ int s_time_main(int argc, char **argv)
      */
 
  next:
-    if (!(perform & 2))
+    if (!(perform & 2)) {
+        ret = 0;
         goto end;
+    }
     printf("\n\nNow timing with session id reuse.\n");
 
     /* Get an SSL object so we can reuse the session id */
@@ -433,6 +435,16 @@ static SSL *doConnection(SSL *scon, const char *host, SSL_CTX *ctx)
         }
     } else {
         serverCon = scon;
+        /*
+         * Reset the SSL object before reusing it for a new connection.
+         * This clears prior handshake and I/O state while keeping
+         * configuration inherited from the SSL_CTX.
+         */
+        if (!SSL_clear(serverCon)) {
+            ERR_print_errors(bio_err);
+            BIO_free(conn);
+            return NULL;
+        }
         SSL_set_connect_state(serverCon);
     }
 

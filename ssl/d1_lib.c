@@ -1,5 +1,5 @@
 /*
- * Copyright 2005-2024 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2005-2025 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -14,6 +14,7 @@
 #include <openssl/rand.h>
 #include "ssl_local.h"
 #include "internal/time.h"
+#include "internal/ssl_unwrap.h"
 
 static int dtls1_handshake_write(SSL_CONNECTION *s);
 static size_t dtls1_link_min_mtu(void);
@@ -82,13 +83,6 @@ int dtls1_new(SSL *ssl)
 
     d1->buffered_messages = pqueue_new();
     d1->sent_messages = pqueue_new();
-
-    if (s->server) {
-        d1->cookie_len = sizeof(s->d1->cookie);
-    }
-
-    d1->link_mtu = 0;
-    d1->mtu = 0;
 
     if (d1->buffered_messages == NULL || d1->sent_messages == NULL) {
         pqueue_free(d1->buffered_messages);
@@ -197,10 +191,6 @@ int dtls1_clear(SSL *ssl)
 
         /* Restore the timer callback from previous state */
         s->d1->timer_cb = timer_cb;
-
-        if (s->server) {
-            s->d1->cookie_len = sizeof(s->d1->cookie);
-        }
 
         if (SSL_get_options(ssl) & SSL_OP_NO_QUERY_MTU) {
             s->d1->mtu = mtu;
@@ -572,7 +562,7 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
         }
 
         /* Message sequence number can only be 0 or 1 */
-        if (msgseq > 2) {
+        if (msgseq > 1) {
             ERR_raise(ERR_LIB_SSL, SSL_R_INVALID_SEQUENCE_NUMBER);
             goto end;
         }
@@ -747,7 +737,7 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
                    3);
 
             if (s->msg_callback)
-                s->msg_callback(1, 0, SSL3_RT_HEADER, buf,
+                s->msg_callback(1, version, SSL3_RT_HEADER, wbuf,
                                 DTLS1_RT_HEADER_LENGTH, ssl,
                                 s->msg_callback_arg);
 
@@ -767,7 +757,7 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
             BIO_ADDR_free(tmpclient);
             tmpclient = NULL;
 
-            if (BIO_write(wbio, wbuf, wreclen) < (int)wreclen) {
+            if (BIO_write(wbio, wbuf, (int)wreclen) < (int)wreclen) {
                 if (BIO_should_retry(wbio)) {
                     /*
                      * Non-blocking IO...but we're stateless, so we're just
@@ -862,7 +852,7 @@ int dtls1_shutdown(SSL *s)
     BIO *wbio;
     SSL_CONNECTION *sc = SSL_CONNECTION_FROM_SSL_ONLY(s);
 
-    if (s == NULL)
+    if (sc == NULL)
         return -1;
 
     wbio = SSL_get_wbio(s);

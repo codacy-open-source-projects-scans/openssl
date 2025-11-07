@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2024 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2002-2025 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright (c) 2002, Oracle and/or its affiliates. All rights reserved
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
@@ -256,10 +256,7 @@ static int ecdsa_keygen_knownanswer_test(EC_KEY *eckey, BN_CTX *ctx,
     int len, ret = 0;
     OSSL_SELF_TEST *st = NULL;
     unsigned char bytes[512] = {0};
-    EC_POINT *pub_key2 = EC_POINT_new(eckey->group);
-
-    if (pub_key2 == NULL)
-        return 0;
+    EC_POINT *pub_key2 = NULL;
 
     st = OSSL_SELF_TEST_new(cb, cbarg);
     if (st == NULL)
@@ -267,6 +264,9 @@ static int ecdsa_keygen_knownanswer_test(EC_KEY *eckey, BN_CTX *ctx,
 
     OSSL_SELF_TEST_onbegin(st, OSSL_SELF_TEST_TYPE_PCT_KAT,
                                OSSL_SELF_TEST_DESC_PCT_ECDSA);
+
+    if ((pub_key2 = EC_POINT_new(eckey->group)) == NULL)
+        goto err;
 
     /* pub_key = priv_key * G (where G is a point on the curve) */
     if (!EC_POINT_mul(eckey->group, pub_key2, eckey->priv_key, NULL, NULL, ctx))
@@ -1007,14 +1007,14 @@ size_t EC_KEY_priv2oct(const EC_KEY *eckey,
 size_t ossl_ec_key_simple_priv2oct(const EC_KEY *eckey,
                                    unsigned char *buf, size_t len)
 {
-    size_t buf_len;
+    int buf_len;
 
     buf_len = (EC_GROUP_order_bits(eckey->group) + 7) / 8;
     if (eckey->priv_key == NULL)
         return 0;
     if (buf == NULL)
         return buf_len;
-    else if (len < buf_len)
+    else if (len < (size_t)buf_len)
         return 0;
 
     /* Octetstring may need leading zeros if BN is to short */
@@ -1046,13 +1046,17 @@ int EC_KEY_oct2priv(EC_KEY *eckey, const unsigned char *buf, size_t len)
 int ossl_ec_key_simple_oct2priv(EC_KEY *eckey, const unsigned char *buf,
                                 size_t len)
 {
+    if (len > INT_MAX) {
+        ERR_raise(ERR_LIB_EC, ERR_R_PASSED_INVALID_ARGUMENT);
+        return 0;
+    }
     if (eckey->priv_key == NULL)
         eckey->priv_key = BN_secure_new();
     if (eckey->priv_key == NULL) {
         ERR_raise(ERR_LIB_EC, ERR_R_BN_LIB);
         return 0;
     }
-    if (BN_bin2bn(buf, len, eckey->priv_key) == NULL) {
+    if (BN_bin2bn(buf, (int)len, eckey->priv_key) == NULL) {
         ERR_raise(ERR_LIB_EC, ERR_R_BN_LIB);
         return 0;
     }

@@ -1,11 +1,12 @@
 /*
- * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2025 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
  */
+
 #include <openssl/store.h>
 #include <openssl/core_dispatch.h>
 #include <openssl/core_names.h>
@@ -23,11 +24,12 @@
 #include "prov/implementations.h"
 #include "prov/providercommon.h"
 #include "prov/bio.h"
-#include "file_store_local.h"
+#include "prov/file_store_local.h"
 #ifdef __CYGWIN__
 # include <windows.h>
 #endif
 #include <wincrypt.h>
+#include "providers/implementations/storemgmt/winstore_store.inc"
 
 enum {
     STATE_IDLE,
@@ -65,7 +67,7 @@ static void winstore_win_advance(struct winstore_ctx_st *ctx)
     if (ctx->state == STATE_EOF)
         return;
 
-    name.cbData = ctx->subject_len;
+    name.cbData = (DWORD)ctx->subject_len;
     name.pbData = ctx->subject;
 
     ctx->win_ctx = (name.cbData == 0 ? NULL :
@@ -106,38 +108,31 @@ static void *winstore_attach(void *provctx, OSSL_CORE_BIO *cin)
 
 static const OSSL_PARAM *winstore_settable_ctx_params(void *loaderctx, const OSSL_PARAM params[])
 {
-    static const OSSL_PARAM known_settable_ctx_params[] = {
-        OSSL_PARAM_octet_string(OSSL_STORE_PARAM_SUBJECT, NULL, 0),
-        OSSL_PARAM_utf8_string(OSSL_STORE_PARAM_PROPERTIES, NULL, 0),
-        OSSL_PARAM_END
-    };
-    return known_settable_ctx_params;
+    return winstore_set_ctx_params_list;
 }
 
 static int winstore_set_ctx_params(void *loaderctx, const OSSL_PARAM params[])
 {
     struct winstore_ctx_st *ctx = loaderctx;
-    const OSSL_PARAM *p;
+    struct winstore_set_ctx_params_st p;
     int do_reset = 0;
 
-    if (ossl_param_is_empty(params))
-        return 1;
+    if (ctx == NULL || !winstore_set_ctx_params_decoder(params, &p))
+        return 0;
 
-    p = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_PROPERTIES);
-    if (p != NULL) {
+    if (p.propq != NULL) {
         do_reset = 1;
         OPENSSL_free(ctx->propq);
         ctx->propq = NULL;
-        if (!OSSL_PARAM_get_utf8_string(p, &ctx->propq, 0))
+        if (!OSSL_PARAM_get_utf8_string(p.propq, &ctx->propq, 0))
             return 0;
     }
 
-    p = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_SUBJECT);
-    if (p != NULL) {
+    if (p.sub != NULL) {
         const unsigned char *der = NULL;
         size_t der_len = 0;
 
-        if (!OSSL_PARAM_get_octet_string_ptr(p, (const void **)&der, &der_len))
+        if (!OSSL_PARAM_get_octet_string_ptr(p.sub, (const void **)&der, &der_len))
             return 0;
 
         do_reset = 1;
@@ -183,6 +178,7 @@ static int setup_decoder(struct winstore_ctx_st *ctx)
 {
     OSSL_LIB_CTX *libctx = ossl_prov_ctx_get0_libctx(ctx->provctx);
     const OSSL_ALGORITHM *to_algo = NULL;
+    const char *input_structure = NULL;
 
     if (ctx->dctx != NULL)
         return 1;
@@ -198,7 +194,8 @@ static int setup_decoder(struct winstore_ctx_st *ctx)
         goto err;
     }
 
-    if (!OSSL_DECODER_CTX_set_input_structure(ctx->dctx, "Certificate")) {
+    input_structure = "Certificate";
+    if (!OSSL_DECODER_CTX_set_input_structure(ctx->dctx, input_structure)) {
         ERR_raise(ERR_LIB_PROV, ERR_R_OSSL_DECODER_LIB);
         goto err;
     }
@@ -208,6 +205,7 @@ static int setup_decoder(struct winstore_ctx_st *ctx)
          to_algo++) {
         OSSL_DECODER *to_obj = NULL;
         OSSL_DECODER_INSTANCE *to_obj_inst = NULL;
+        const char *input_type;
 
         /*
          * Create the internal last resort decoder implementation
@@ -217,11 +215,21 @@ static int setup_decoder(struct winstore_ctx_st *ctx)
          */
         to_obj = ossl_decoder_from_algorithm(0, to_algo, NULL);
         if (to_obj != NULL)
-            to_obj_inst = ossl_decoder_instance_new(to_obj, ctx->provctx);
+            to_obj_inst = ossl_decoder_instance_new_forprov(to_obj, ctx->provctx,
+                                                            input_structure);
 
         OSSL_DECODER_free(to_obj);
         if (to_obj_inst == NULL)
             goto err;
+
+        /*
+         * The input type has to be DER
+         */
+        input_type = OSSL_DECODER_INSTANCE_get_input_type(to_obj_inst);
+        if (OPENSSL_strcasecmp(input_type, "DER") != 0) {
+            ossl_decoder_instance_free(to_obj_inst);
+            continue;
+        }
 
         if (!ossl_decoder_ctx_add_decoder_inst(ctx->dctx,
                                                to_obj_inst)) {

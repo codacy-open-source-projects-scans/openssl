@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2023 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2019-2025 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -25,6 +25,7 @@
 #include "prov/provider_ctx.h"
 #include "crypto/rsa.h"
 #include "crypto/cryptlib.h"
+#include "internal/fips.h"
 #include "internal/param_build_set.h"
 
 static OSSL_FUNC_keymgmt_new_fn rsa_newdata;
@@ -52,7 +53,6 @@ static OSSL_FUNC_keymgmt_query_operation_name_fn rsa_query_operation_name;
 static OSSL_FUNC_keymgmt_dup_fn rsa_dup;
 
 #define RSA_DEFAULT_MD "SHA256"
-#define RSA_PSS_DEFAULT_MD OSSL_DIGEST_NAME_SHA1
 #define RSA_POSSIBLE_SELECTIONS                                        \
     (OSSL_KEYMGMT_SELECT_KEYPAIR | OSSL_KEYMGMT_SELECT_OTHER_PARAMETERS)
 
@@ -235,7 +235,7 @@ static int rsa_export(void *keydata, int selection,
     }
 
     ok = param_callback(params, cbarg);
-    OSSL_PARAM_free(params);
+    OSSL_PARAM_clear_free(params);
 err:
     OSSL_PARAM_BLD_free(tmpl);
     return ok;
@@ -344,6 +344,9 @@ static int rsa_get_params(void *key, OSSL_PARAM params[])
     if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE)) != NULL
         && (empty || !OSSL_PARAM_set_int(p, RSA_size(rsa))))
         return 0;
+    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_CATEGORY)) != NULL)
+        if (!OSSL_PARAM_set_int(p, 0))
+            return 0;
 
     /*
      * For restricted RSA-PSS keys, we ignore the default digest request.
@@ -379,6 +382,7 @@ static const OSSL_PARAM rsa_params[] = {
     OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
     OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
     OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+    OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_CATEGORY, NULL),
     OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_DEFAULT_DIGEST, NULL, 0),
     RSA_KEY_TYPES()
     OSSL_PARAM_END

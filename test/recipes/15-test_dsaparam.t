@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2017-2021 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2017-2025 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -11,7 +11,7 @@ use warnings;
 
 use File::Spec;
 use File::Copy;
-use File::Compare qw/compare/;
+use File::Compare qw/compare_text/;
 use OpenSSL::Glob;
 use OpenSSL::Test qw/:DEFAULT data_file/;
 use OpenSSL::Test::Utils;
@@ -84,4 +84,4 @@ my $inout = "inout.pem";
 copy($input, $inout);
 ok(run(app(['openssl', 'dsaparam', '-in', $inout, '-out', $inout])),
     "identical infile and outfile");
-ok(!compare($input, $inout), "converted file $inout did not change");
+ok(!compare_text($input, $inout), "converted file $inout did not change");

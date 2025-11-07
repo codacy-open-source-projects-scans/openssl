@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2022-2025 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -28,7 +28,7 @@ ok(run(app(['openssl', 'pkcs8', '-topk8', '-in', $inout,
 ok(run(app(['openssl', 'pkcs8', '-in', $inout,
             '-out', $inout, '-passin', 'pass:password'])),
    "identical infile and outfile, from PKCS#8");
-is(compare($pc5_key, $inout), 0,
+is(compare_text($pc5_key, $inout), 0,
    "Same file contents after converting forth and back");
 
 ok(run(app(([ 'openssl', 'pkcs8', '-topk8',

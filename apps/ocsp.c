@@ -1,5 +1,5 @@
 /*
- * Copyright 2001-2024 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2001-2025 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -38,7 +38,7 @@
 int setpgid(pid_t pid, pid_t pgid)
 {
     errno = ENOSYS;
-    return 0;
+    return 0; /* no error if setpgid() is not provided by platform */
 }
 /* not supported */
 pid_t fork(void)
@@ -662,7 +662,8 @@ redo_accept:
                 resp =
                     OCSP_response_create(OCSP_RESPONSE_STATUS_MALFORMEDREQUEST,
                                          NULL);
-                send_ocsp_response(cbio, resp);
+                if (resp != NULL)
+                    send_ocsp_response(cbio, resp);
             }
             goto done_resp;
         }
@@ -764,16 +765,18 @@ redo_accept:
         BIO_free(derbio);
     }
 
-    i = OCSP_response_status(resp);
-    if (i != OCSP_RESPONSE_STATUS_SUCCESSFUL) {
-        BIO_printf(out, "Responder Error: %s (%d)\n",
-                   OCSP_response_status_str(i), i);
-        if (!ignore_err)
+    if (resp != NULL) {
+        i = OCSP_response_status(resp);
+        if (i != OCSP_RESPONSE_STATUS_SUCCESSFUL) {
+            BIO_printf(out, "Responder Error: %s (%d)\n",
+                       OCSP_response_status_str(i), i);
+            if (!ignore_err)
                 goto end;
-    }
+        }
 
-    if (resp_text)
-        OCSP_RESPONSE_print(out, resp, 0);
+        if (resp_text)
+            OCSP_RESPONSE_print(out, resp, 0);
+    }
 
     /* If running as responder don't verify our own response */
     if (cbio != NULL) {
@@ -904,7 +907,7 @@ static int add_ocsp_cert(OCSP_REQUEST **req, X509 *cert,
                          const EVP_MD *cert_id_md, X509 *issuer,
                          STACK_OF(OCSP_CERTID) *ids)
 {
-    OCSP_CERTID *id;
+    OCSP_CERTID *id = NULL;
 
     if (issuer == NULL) {
         BIO_printf(bio_err, "No issuer certificate specified\n");
@@ -917,11 +920,14 @@ static int add_ocsp_cert(OCSP_REQUEST **req, X509 *cert,
     id = OCSP_cert_to_id(cert_id_md, cert, issuer);
     if (id == NULL || !sk_OCSP_CERTID_push(ids, id))
         goto err;
-    if (!OCSP_request_add0_id(*req, id))
+    if (!OCSP_request_add0_id(*req, id)) {
+        id = NULL;
         goto err;
+    }
     return 1;
 
  err:
+    OCSP_CERTID_free(id);
     BIO_printf(bio_err, "Error Creating OCSP request\n");
     return 0;
 }
@@ -930,7 +936,7 @@ static int add_ocsp_serial(OCSP_REQUEST **req, char *serial,
                            const EVP_MD *cert_id_md, X509 *issuer,
                            STACK_OF(OCSP_CERTID) *ids)
 {
-    OCSP_CERTID *id;
+    OCSP_CERTID *id = NULL;
     const X509_NAME *iname;
     ASN1_BIT_STRING *ikey;
     ASN1_INTEGER *sno;
@@ -954,11 +960,14 @@ static int add_ocsp_serial(OCSP_REQUEST **req, char *serial,
     ASN1_INTEGER_free(sno);
     if (id == NULL || !sk_OCSP_CERTID_push(ids, id))
         goto err;
-    if (!OCSP_request_add0_id(*req, id))
+    if (!OCSP_request_add0_id(*req, id)) {
+        id = NULL;
         goto err;
+    }
     return 1;
 
  err:
+    OCSP_CERTID_free(id);
     BIO_printf(bio_err, "Error Creating OCSP request\n");
     return 0;
 }
@@ -1049,6 +1058,10 @@ static void make_ocsp_response(BIO *err, OCSP_RESPONSE **resp, OCSP_REQUEST *req
     }
 
     bs = OCSP_BASICRESP_new();
+    if (bs == NULL) {
+        *resp = OCSP_response_create(OCSP_RESPONSE_STATUS_INTERNALERROR, bs);
+        goto end;
+    }
     thisupd = X509_gmtime_adj(NULL, 0);
     if (ndays != -1)
         nextupd = X509_time_adj_ex(NULL, ndays, nmin * 60, NULL);

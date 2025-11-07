@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2023 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2020-2025 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -30,7 +30,9 @@
 #include "prov/implementations.h"
 #include "prov/bio.h"
 #include "prov/providercommon.h"
-#include "file_store_local.h"
+#include "prov/file_store_local.h"
+
+#include "providers/implementations/storemgmt/file_store.inc"
 
 DEFINE_STACK_OF(OSSL_STORE_INFO)
 
@@ -195,10 +197,7 @@ static void *file_open(void *provctx, const char *uri)
 {
     struct file_ctx_st *ctx = NULL;
     struct stat st;
-    struct {
-        const char *path;
-        unsigned int check_absolute:1;
-    } path_data[2];
+    const char *path_data[2];
     size_t path_data_n = 0, i;
     const char *path, *p = uri, *q;
     BIO *bio;
@@ -208,8 +207,7 @@ static void *file_open(void *provctx, const char *uri)
     /*
      * First step, just take the URI as is.
      */
-    path_data[path_data_n].check_absolute = 0;
-    path_data[path_data_n++].path = uri;
+    path_data[path_data_n++] = uri;
 
     /*
      * Second step, if the URI appears to start with the "file" scheme,
@@ -222,7 +220,11 @@ static void *file_open(void *provctx, const char *uri)
         if (CHECK_AND_SKIP_CASE_PREFIX(q, "//")) {
             path_data_n--;           /* Invalidate using the full URI */
             if (CHECK_AND_SKIP_CASE_PREFIX(q, "localhost/")
-                    || CHECK_AND_SKIP_CASE_PREFIX(q, "/")) {
+                || CHECK_AND_SKIP_CASE_PREFIX(q, "/")) {
+                /*
+                 * In this case, we step back on char to ensure that the
+                 * first slash is preserved, making the path always absolute
+                 */
                 p = q - 1;
             } else {
                 ERR_clear_last_mark();
@@ -230,42 +232,28 @@ static void *file_open(void *provctx, const char *uri)
                 return NULL;
             }
         }
-
-        path_data[path_data_n].check_absolute = 1;
 #ifdef _WIN32
         /* Windows "file:" URIs with a drive letter start with a '/' */
         if (p[0] == '/' && p[2] == ':' && p[3] == '/') {
             char c = tolower((unsigned char)p[1]);
 
             if (c >= 'a' && c <= 'z') {
+                /* Skip past the slash, making the path a normal Windows path */
                 p++;
-                /* We know it's absolute, so no need to check */
-                path_data[path_data_n].check_absolute = 0;
             }
         }
 #endif
-        path_data[path_data_n++].path = p;
+        path_data[path_data_n++] = p;
     }
 
 
     for (i = 0, path = NULL; path == NULL && i < path_data_n; i++) {
-        /*
-         * If the scheme "file" was an explicit part of the URI, the path must
-         * be absolute.  So says RFC 8089
-         */
-        if (path_data[i].check_absolute && path_data[i].path[0] != '/') {
-            ERR_clear_last_mark();
-            ERR_raise_data(ERR_LIB_PROV, PROV_R_PATH_MUST_BE_ABSOLUTE,
-                           "Given path=%s", path_data[i].path);
-            return NULL;
-        }
-
-        if (stat(path_data[i].path, &st) < 0) {
+        if (stat(path_data[i], &st) < 0) {
             ERR_raise_data(ERR_LIB_SYS, errno,
                            "calling stat(%s)",
-                           path_data[i].path);
+                           path_data[i]);
         } else {
-            path = path_data[i].path;
+            path = path_data[i];
         }
     }
     if (path == NULL) {
@@ -306,66 +294,62 @@ void *file_attach(void *provctx, OSSL_CORE_BIO *cin)
 
 static const OSSL_PARAM *file_settable_ctx_params(void *provctx)
 {
-    static const OSSL_PARAM known_settable_ctx_params[] = {
-        OSSL_PARAM_utf8_string(OSSL_STORE_PARAM_PROPERTIES, NULL, 0),
-        OSSL_PARAM_int(OSSL_STORE_PARAM_EXPECT, NULL),
-        OSSL_PARAM_octet_string(OSSL_STORE_PARAM_SUBJECT, NULL, 0),
-        OSSL_PARAM_utf8_string(OSSL_STORE_PARAM_INPUT_TYPE, NULL, 0),
-        OSSL_PARAM_END
-    };
-    return known_settable_ctx_params;
+    return file_set_ctx_params_list;
 }
 
 static int file_set_ctx_params(void *loaderctx, const OSSL_PARAM params[])
 {
     struct file_ctx_st *ctx = loaderctx;
-    const OSSL_PARAM *p;
+    struct file_set_ctx_params_st p;
 
-    if (ossl_param_is_empty(params))
-        return 1;
+    if (ctx == NULL || !file_set_ctx_params_decoder(params, &p))
+        return 0;
 
     if (ctx->type != IS_DIR) {
         /* these parameters are ignored for directories */
-        p = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_PROPERTIES);
-        if (p != NULL) {
+        if (p.propq != NULL) {
             OPENSSL_free(ctx->_.file.propq);
             ctx->_.file.propq = NULL;
-            if (!OSSL_PARAM_get_utf8_string(p, &ctx->_.file.propq, 0))
+            if (!OSSL_PARAM_get_utf8_string(p.propq, &ctx->_.file.propq, 0))
                 return 0;
         }
-        p = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_INPUT_TYPE);
-        if (p != NULL) {
+        if (p.type != NULL) {
             OPENSSL_free(ctx->_.file.input_type);
             ctx->_.file.input_type = NULL;
-            if (!OSSL_PARAM_get_utf8_string(p, &ctx->_.file.input_type, 0))
+            if (!OSSL_PARAM_get_utf8_string(p.type, &ctx->_.file.input_type, 0))
                 return 0;
         }
     }
-    p = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_EXPECT);
-    if (p != NULL && !OSSL_PARAM_get_int(p, &ctx->expected_type))
+
+    if (p.expect != NULL && !OSSL_PARAM_get_int(p.expect, &ctx->expected_type))
         return 0;
-    p = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_SUBJECT);
-    if (p != NULL) {
+
+    if (p.sub != NULL) {
         const unsigned char *der = NULL;
         size_t der_len = 0;
         X509_NAME *x509_name;
         unsigned long hash;
-        int ok;
+        int ok = 0;
 
-        if (ctx->type != IS_DIR) {
-            ERR_raise(ERR_LIB_PROV,
-                      PROV_R_SEARCH_ONLY_SUPPORTED_FOR_DIRECTORIES);
+        if (!OSSL_PARAM_get_octet_string_ptr(p.sub, (const void **)&der, &der_len)
+            || der_len > LONG_MAX
+            || (x509_name = d2i_X509_NAME(NULL, &der, (long)der_len)) == NULL)
             return 0;
+        if (ctx->type != IS_DIR) {
+            char *str = X509_NAME_oneline(x509_name, NULL, 0);
+
+            ERR_raise_data(ERR_LIB_PROV, PROV_R_SEARCH_ONLY_SUPPORTED_FOR_DIRECTORIES,
+                           "uri=%s:subject=%s", ctx->uri, str);
+            OPENSSL_free(str);
+            goto end;
         }
 
-        if (!OSSL_PARAM_get_octet_string_ptr(p, (const void **)&der, &der_len)
-            || (x509_name = d2i_X509_NAME(NULL, &der, der_len)) == NULL)
-            return 0;
         hash = X509_NAME_hash_ex(x509_name,
                                  ossl_prov_ctx_get0_libctx(ctx->provctx), NULL,
                                  &ok);
         BIO_snprintf(ctx->_.dir.search_name, sizeof(ctx->_.dir.search_name),
                      "%08lx", hash);
+    end:
         X509_NAME_free(x509_name);
         if (ok == 0)
             return 0;
@@ -416,6 +400,7 @@ static int file_setup_decoders(struct file_ctx_st *ctx)
 {
     OSSL_LIB_CTX *libctx = ossl_prov_ctx_get0_libctx(ctx->provctx);
     const OSSL_ALGORITHM *to_algo = NULL;
+    const char *input_structure = NULL;
     int ok = 0;
 
     /* Setup for this session, so only if not already done */
@@ -439,16 +424,43 @@ static int file_setup_decoders(struct file_ctx_st *ctx)
          * for this load.
          */
         switch (ctx->expected_type) {
-        case OSSL_STORE_INFO_CERT:
+        case OSSL_STORE_INFO_PUBKEY:
+            input_structure = "SubjectPublicKeyInfo";
             if (!OSSL_DECODER_CTX_set_input_structure(ctx->_.file.decoderctx,
-                                                      "Certificate")) {
+                                                      input_structure)) {
+                ERR_raise(ERR_LIB_PROV, ERR_R_OSSL_DECODER_LIB);
+                goto err;
+            }
+            break;
+        case OSSL_STORE_INFO_PKEY:
+            /*
+             * The user's OSSL_STORE_INFO_PKEY covers PKCS#8, whether encrypted
+             * or not.  The decoder will figure out whether decryption is
+             * applicable and fall back as necessary.  We just need to indicate
+             * that it is OK to try and encrypt, which may involve a password
+             * prompt, so not done unless the data type is explicit, as we
+             * might then get a password prompt for a key when reading only
+             * certs from a file.
+             */
+            input_structure = "EncryptedPrivateKeyInfo";
+            if (!OSSL_DECODER_CTX_set_input_structure(ctx->_.file.decoderctx,
+                                                      input_structure)) {
+                ERR_raise(ERR_LIB_PROV, ERR_R_OSSL_DECODER_LIB);
+                goto err;
+            }
+            break;
+        case OSSL_STORE_INFO_CERT:
+            input_structure = "Certificate";
+            if (!OSSL_DECODER_CTX_set_input_structure(ctx->_.file.decoderctx,
+                                                      input_structure)) {
                 ERR_raise(ERR_LIB_PROV, ERR_R_OSSL_DECODER_LIB);
                 goto err;
             }
             break;
         case OSSL_STORE_INFO_CRL:
+            input_structure = "CertificateList";
             if (!OSSL_DECODER_CTX_set_input_structure(ctx->_.file.decoderctx,
-                                                      "CertificateList")) {
+                                                      input_structure)) {
                 ERR_raise(ERR_LIB_PROV, ERR_R_OSSL_DECODER_LIB);
                 goto err;
             }
@@ -462,6 +474,7 @@ static int file_setup_decoders(struct file_ctx_st *ctx)
              to_algo++) {
             OSSL_DECODER *to_obj = NULL;
             OSSL_DECODER_INSTANCE *to_obj_inst = NULL;
+            const char *input_type;
 
             /*
              * Create the internal last resort decoder implementation
@@ -471,10 +484,25 @@ static int file_setup_decoders(struct file_ctx_st *ctx)
              */
             to_obj = ossl_decoder_from_algorithm(0, to_algo, NULL);
             if (to_obj != NULL)
-                to_obj_inst = ossl_decoder_instance_new(to_obj, ctx->provctx);
+                to_obj_inst =
+                    ossl_decoder_instance_new_forprov(to_obj, ctx->provctx,
+                                                      input_structure);
             OSSL_DECODER_free(to_obj);
             if (to_obj_inst == NULL)
                 goto err;
+            /*
+             * The input type has to match unless, the input type is PEM
+             * and the decoder input type is DER, in which case we'll pick
+             * up additional decoders.
+             */
+            input_type = OSSL_DECODER_INSTANCE_get_input_type(to_obj_inst);
+            if (ctx->_.file.input_type != NULL
+                && OPENSSL_strcasecmp(input_type, ctx->_.file.input_type) != 0
+                && (OPENSSL_strcasecmp(ctx->_.file.input_type, "PEM") != 0
+                    || OPENSSL_strcasecmp(input_type, "der") != 0)) {
+                ossl_decoder_instance_free(to_obj_inst);
+                continue;
+            }
 
             if (!ossl_decoder_ctx_add_decoder_inst(ctx->_.file.decoderctx,
                                                    to_obj_inst)) {
@@ -553,7 +581,7 @@ static char *file_name_to_uri(struct file_ctx_st *ctx, const char *name)
     assert(name != NULL);
     {
         const char *pathsep = ossl_ends_with_dirsep(ctx->uri) ? "" : "/";
-        long calculated_length = strlen(ctx->uri) + strlen(pathsep)
+        size_t calculated_length = strlen(ctx->uri) + strlen(pathsep)
             + strlen(name) + 1 /* \0 */;
 
         data = OPENSSL_zalloc(calculated_length);

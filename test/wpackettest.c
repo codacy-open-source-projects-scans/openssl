@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2024 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2025 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -588,9 +588,9 @@ static int test_WPACKET_quic_vlint_random(void)
 
     for (i = 0; i < 10000; ++i) {
         if (!TEST_int_gt(RAND_bytes(rand_data, sizeof(rand_data)), 0))
-            return cleanup(&pkt);
+            return 0;
 
-        expected = *(uint64_t*)rand_data;
+        memcpy(&expected, rand_data, sizeof(expected));
 
         /*
          * Ensure that all size classes get tested with equal probability.

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2024 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2025 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -221,6 +221,7 @@ struct x509_store_ctx_st {      /* X509_STORE_CTX */
     STACK_OF(X509) *untrusted;
     /* set of CRLs passed in */
     STACK_OF(X509_CRL) *crls;
+    STACK_OF(OCSP_RESPONSE) *ocsp_resp;
     X509_VERIFY_PARAM *param;
     /* Other info for use with get_issuer() */
     void *other_ctx;
@@ -292,6 +293,7 @@ struct pkcs8_priv_key_info_st {
     X509_ALGOR *pkeyalg;
     ASN1_OCTET_STRING *pkey;
     STACK_OF(X509_ATTRIBUTE) *attributes;
+    ASN1_OCTET_STRING *kpub;
 };
 
 struct X509_sig_st {
@@ -363,6 +365,7 @@ ECX_KEY *ossl_d2i_X448_PUBKEY(ECX_KEY **a,
                               const unsigned char **pp, long length);
 int ossl_i2d_X448_PUBKEY(const ECX_KEY *a, unsigned char **pp);
 # endif /* OPENSSL_NO_EC */
+
 EVP_PKEY *ossl_d2i_PUBKEY_legacy(EVP_PKEY **a, const unsigned char **pp,
                                  long length);
 int ossl_x509_check_private_key(const EVP_PKEY *k, const EVP_PKEY *pkey);
@@ -394,5 +397,11 @@ int ossl_print_attribute_value(BIO *out,
 
 int ossl_serial_number_print(BIO *out, const ASN1_INTEGER *bs, int indent);
 int ossl_bio_print_hex(BIO *out, unsigned char *buf, int len);
+int ossl_x509_compare_asn1_time(const X509_VERIFY_PARAM *vpm,
+                                const ASN1_TIME *time, int *comparison);
+int ossl_x509_check_certificate_times(const X509_VERIFY_PARAM *vpm, X509 *x,
+                                      int *error);
+/* No error callback if depth < 0 */
+int ossl_x509_check_cert_time(X509_STORE_CTX *ctx, X509 *x, int depth);
 
 #endif  /* OSSL_CRYPTO_X509_H */

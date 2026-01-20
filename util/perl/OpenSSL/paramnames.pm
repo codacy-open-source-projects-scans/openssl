@@ -172,6 +172,11 @@ my %params = (
     'OSSL_DIGEST_PARAM_SIZE' =>         "size",         # size_t
     'OSSL_DIGEST_PARAM_XOF' =>          "xof",          # int, 0 or 1
     'OSSL_DIGEST_PARAM_ALGID_ABSENT' => "algid-absent", # int, 0 or 1
+# external mu digest parameters
+    'OSSL_DIGEST_PARAM_MU_PUB_KEY' =>        "pub",                        # octet string
+    'OSSL_DIGEST_PARAM_MU_CONTEXT_STRING' => "context-string",             # octet string
+    'OSSL_DIGEST_PARAM_MU_DIGEST' =>         '*OSSL_ALG_PARAM_DIGEST',     # utf8 string
+    'OSSL_DIGEST_PARAM_MU_PROPERTIES' =>     '*OSSL_ALG_PARAM_PROPERTIES', # utf8 string
 
 # MAC parameters
     'OSSL_MAC_PARAM_KEY' =>            "key",           # octet string
@@ -343,6 +348,7 @@ my %params = (
 
 # Elliptic Curve Explicit Domain Parameters
     'OSSL_PKEY_PARAM_EC_FIELD_TYPE' =>                   "field-type",
+    'OSSL_PKEY_PARAM_EC_FIELD_DEGREE' =>                 "field-degree",
     'OSSL_PKEY_PARAM_EC_P' =>                            "p",
     'OSSL_PKEY_PARAM_EC_A' =>                            "a",
     'OSSL_PKEY_PARAM_EC_B' =>                            "b",

@@ -32,6 +32,30 @@ OpenSSL 4.0
 
 ### Changes between 3.6 and 4.0 [xx XXX xxxx]
 
+ * Added configure options to disable KDF algorithms for
+   hmac-drbg-kdf, kbkdf, krb5kdf, pvkkdf, snmpkdf, sskdf, sshkdf, x942kdf and x963kdf.
+
+   *Shane Lontis*
+
+ * Remove support for an SSLv2 Client Hello. When a client wanted to support
+   both SSLv2 and higher versions like SSLv3 or even TLSv1, it needed to
+   send an SSLv2 Client Hello. SSLv2 support itself was removed in version
+   1.1.0, but there was still compatibility code for clients sending an SSLv2
+   Client Hello. Since we no longer support SSLv2 Client Hello,
+   SSL_client_hello_isv2() is now deprecated and always returns 0.
+
+   *Kurt Roeckx*
+
+ * Added "ML-DSA-MU" digest algorithm support.
+
+   *Shane Lontis*
+
+ * Support of explicit EC curves was disabled by default, an error will occur if
+   an explicit EC curve doesn't match any known one. New configuration option,
+   `enable-ec_explicit_curves` is added.
+
+   *Dmitry Belyavskiy*
+
  * Removed configure options can now only be disabled. You may continue to use
    `disable-<feature>`, which will remain supported. Using `enable-<feature>`
    for a removed feature is no longer permitted.
@@ -347,6 +371,10 @@ OpenSSL 3.6
    generation to the FIPS provider.
 
    *Dimitri John Ledkov*
+
+ * SSL_CTX_is_server() was added.
+
+   *Igor Ustinov*
 
 OpenSSL 3.5
 -----------

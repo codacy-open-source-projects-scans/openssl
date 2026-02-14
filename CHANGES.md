@@ -32,6 +32,11 @@ OpenSSL 4.0
 
 ### Changes between 3.6 and 4.0 [xx XXX xxxx]
 
+ * FIPS self tests can now be deferred and run as needed when installing
+   the fips module with the -defer_tests option.
+
+   *Simo Sorce*
+
  * OPENSSL_cleanup() now runs in a global destructor, or not at all by default.
 
    OpenSSL_cleanup() will no longer by default free global objects when run from
@@ -41,6 +46,15 @@ OpenSSL 4.0
    nothing, leaving the global objects to be cleaned up by the Operating System.
 
    *Bob Beck*
+
+ * Made X509_ATTRIBUTE accessor functions const-correct. The functions
+   X509_ATTRIBUTE_get0_object(), X509_ATTRIBUTE_get0_type(), and
+   X509_ATTRIBUTE_get0_data() now accept `const X509_ATTRIBUTE *` and
+   return const pointers. Related PKCS12 functions PKCS12_get_attr_gen(),
+   PKCS12_get_attr(), and PKCS8_get_attr() have also been updated to
+   return `const ASN1_TYPE *`.
+
+   *kovan*
 
  * Added CSHAKE as per [SP 800-185]
 

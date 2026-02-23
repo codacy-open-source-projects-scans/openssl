@@ -613,7 +613,7 @@ X509_CRL *X509_CRL_new_ex(OSSL_LIB_CTX *libctx, const char *propq);
 int X509_CRL_add0_revoked(X509_CRL *crl, X509_REVOKED *rev);
 int X509_CRL_get0_by_serial(X509_CRL *crl,
     X509_REVOKED **ret, const ASN1_INTEGER *serial);
-int X509_CRL_get0_by_cert(X509_CRL *crl, X509_REVOKED **ret, X509 *x);
+int X509_CRL_get0_by_cert(X509_CRL *crl, X509_REVOKED **ret, const X509 *x);
 
 X509_PKEY *X509_PKEY_new(void);
 void X509_PKEY_free(X509_PKEY *a);
@@ -782,7 +782,7 @@ int X509_REQ_check_private_key(const X509_REQ *req, EVP_PKEY *pkey);
 
 int X509_check_private_key(const X509 *cert, const EVP_PKEY *pkey);
 int X509_chain_check_suiteb(int *perror_depth,
-    X509 *x, STACK_OF(X509) *chain,
+    const X509 *x, STACK_OF(X509) *chain,
     unsigned long flags);
 int X509_CRL_check_suiteb(X509_CRL *crl, EVP_PKEY *pk, unsigned long flags);
 void OSSL_STACK_OF_X509_free(STACK_OF(X509) *certs);

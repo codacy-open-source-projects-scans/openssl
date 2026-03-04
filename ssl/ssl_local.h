@@ -253,7 +253,7 @@
 #define SSL_LOW 0x00000002U
 #define SSL_MEDIUM 0x00000004U
 #define SSL_HIGH 0x00000008U
-#define SSL_FIPS 0x00000010U
+/* #define SSL_FIPS 0x00000010U obsolete FIPS canister remnant */
 #define SSL_NOT_DEFAULT 0x00000020U
 
 /* we have used 0000003f - 26 bits left to go */
@@ -2532,6 +2532,7 @@ __owur unsigned int ssl_get_split_send_fragment(const SSL_CONNECTION *sc);
 
 __owur const SSL_CIPHER *ssl3_get_cipher_by_id(uint32_t id);
 __owur const SSL_CIPHER *ssl3_get_cipher_by_std_name(const char *stdname);
+__owur const SSL_CIPHER *ssl3_get_tls13_cipher_by_std_name(const char *stdname);
 __owur const SSL_CIPHER *ssl3_get_cipher_by_char(const unsigned char *p);
 __owur int ssl3_put_cipher_by_char(const SSL_CIPHER *c, WPACKET *pkt,
     size_t *len);

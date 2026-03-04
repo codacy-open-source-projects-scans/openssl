@@ -27,10 +27,87 @@ OpenSSL Releases
  - [OpenSSL 1.0.0](#openssl-100)
  - [OpenSSL 0.9.x](#openssl-09x)
 
-OpenSSL 4.0
 -----------
 
 ### Changes between 3.6 and 4.0 [xx XXX xxxx]
+
+ * The `openssl-x509(1)`, `openssl-req(1)` and `openssl-ca(1)` command-line
+   utilities no longer have specialised built-in logic to add the SKID and AKID
+   extensions, they are handled through configuration files and command-line
+   options just like any other extension.  See their documentation and also
+   `x509v3_config(5)` for additional details.
+
+   Updated the syntax of the `subjectKeyIdentifier` (SKID) and
+   `authorityKeyIdentifier` (AKID) extensions, introducing the `nonss` qualifier
+   for the `keyid` and `issuer` keywords.
+
+   The x509 "mini-CA" now attempts to find extension settings in the default
+   configuration file even if neither the `-extfile` nor the `-extensions`
+   option is explicitly specified.  Failure to open the default configuration
+   is silently ignored.
+
+   The settings in the stock OpenSSL 4.0 configuration file arrange for
+   addition of the requisite SKID and AKID extensions.  Other configuration
+   files may need to be adjusted if desired.
+
+   *Viktor Dukhovni*
+
+ * New `-expected-rpks` option in the `openssl-s_client(1)` and `openssl-s_server(1)`
+   command line utilities.  This makes it possible to specify one more public keys
+   expected from the remote peer that are then used to authenticate the connection.
+
+   *Viktor Dukhovni*
+
+ * Fixed bug that allowed TLS 1.2 ciphers to be added to the TLS 1.3
+   ciphersuites list, and for that list to contain duplicates.
+   Cipher configuration strings for both TLS 1.2 and 1.3 are now
+   case-insenstive.
+
+   *Viktor Dukhovni*
+
+ * Added LMS support for signature verification to `pkeyutl` command.
+   To enable this, LMS `SubjectPublicKeyInfo` encoder and decoders were
+   added, and the LMS keymanager and signature code were updated.
+
+   *Shane Lontis*
+
+ * New `SSL_get0_sigalg()` and `SSL_get0_shared_sigalg()` functions report the
+   TLS signature algorithm name and codepoint for the peer advertised and shared
+   algorithms respectively.  These supersede the existing `SSL_get_sigalgs()` and
+   `SSL_get_shared_sigalgs()` functions which are only a good fit for TLS 1.2.
+   The names reported are the IANA names, and are expected to consistently match
+   the names expected in `SignatureAlgorithms` configuration settings, see
+   `SSL_CONF_cmd(3)` for details.  Previously reported names were not always directly
+   usable or configurations, and were mostly OpenSSL-specific aliases that
+   rarely matched the official IANA codepoint names.
+
+   There is an associated change in how signature algorithms are reported by the
+   `openssl-s_client(1)` and `openssl-s_server(1)` command-line tools.  They
+   now use the new functions and report the IANA registered names of each
+   signature scheme.  Example new output:
+
+    ```
+    Signature Algorithms: mldsa65:mldsa87:mldsa44:ecdsa_secp256r1_sha256:ecdsa_secp384r1_sha384:ecdsa_secp521r1_sha512:ed25519:ed448:ecdsa_brainpoolP256r1tls13_sha256:ecdsa_brainpoolP384r1tls13_sha384:ecdsa_brainpoolP512r1tls13_sha512:rsa_pss_pss_sha256:rsa_pss_pss_sha384:rsa_pss_pss_sha512:rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha256:rsa_pkcs1_sha384:rsa_pkcs1_sha512:ecdsa_sha224:rsa_pkcs1_sha224:dsa_sha224:dsa_sha256:dsa_sha384:dsa_sha512
+    ```
+
+   *Viktor Dukhovni*
+
+ * Updated the default group list to append `SecP256r1MKEM768` and
+   `curveSM2MLKEM768` to the first tuple in that order after `*X25519MLKEM768`.
+   Also inserted a penultimate tuple with `curveSM2` (just before the `FFDHE`
+   groups).
+
+   *Viktor Dukhovni*
+
+ * Implemented client-side predicted keyshare floating.  When a tuple loses
+   the last element that was tagged for transmission of a predicted client
+   keyshare (by default `*X25519MLKEM768` and `*X25519` in their respective
+   tuples), either because the group is not enabled at compile-time, or
+   because it is removed by configuration (e.g. `DEFAULT:-<groupname>`), if
+   the tuple remains non-empty, the keyshare is inherited by the first (i.e.
+   most preferred) remaining element of the tuple.
+
+   *Viktor Dukhovni*
 
  * Added support for [RFC8998], signature algorithm `sm2sig_sm3`, key exchange
    group `curveSM2`, and [tls-hybrid-sm2-mlkem] post-quantum group
@@ -54,6 +131,11 @@ OpenSSL 4.0
 
    *Viktor Dukhovni*
 
+ * The SSL_TXT_FIPS option has been removed.  This was a remnant of
+   the old FIPS canister and wasn't used anymore.
+
+   * Dr Paul Dale *
+
  * Added support for TLS 1.3 SM cipher suites `TLS_SM4_GCM_SM3` and `TLS_SM4_CCM_SM3`
    from [RFC8998].
 
@@ -66,6 +148,12 @@ OpenSSL 4.0
    algorithms to validate a given certificate.
 
    *Neil Horman*
+
+ * `ASN1_OBJECT_new()` has been deprecated.
+
+   Refer to ossl-migration-guide(7) for more info.
+
+   *Frederik Wedel-Heinen*
 
  * FIPS self tests can now be deferred and run as needed when installing
    the fips module with the `-defer_tests` option.
@@ -104,6 +192,14 @@ OpenSSL 4.0
 
    *kovan*
 
+ * `ASN1_STRING` has been made opaque.
+
+   Access to values from `ASN1_STRING` and related types should be done with the
+   appropriate accessor functions. The various `ASN1_STRING_FLAG` values have
+   been made private.
+
+   *Bob Beck*
+
  * Added CSHAKE as per [SP 800-185]
 
    *Shane Lontis*
@@ -118,6 +214,10 @@ OpenSSL 4.0
    TLS/SSL I/O operations.
 
    *Igor Ustinov*
+
+ * CRLs with a malformed Issuing Distribution Point are now rejected.
+
+   *Daniel Kubec*
 
  * Added configure options to disable KDF algorithms for
    hmac-drbg-kdf, kbkdf, krb5kdf, pvkkdf, snmpkdf, sskdf, sshkdf, x942kdf and x963kdf.
@@ -172,6 +272,12 @@ OpenSSL 4.0
 
    *Kurt Roeckx*
 
+ * Various function return values have been constified, particularly in X509
+   and related areas, and when functions were returning non-const objects
+   owned by a const parameter.
+
+   *Bob Beck*
+
  * The script tool `c_rehash` was removed. Use `openssl rehash` instead.
 
    *Norbert Pocs*
@@ -184,9 +290,17 @@ OpenSSL 4.0
 
    *Alexandr Nedvedicky*
 
- * The `X509_verify()` function now takes a `const X509 *` argument
+ * Many functions accepting `X509 *` arguments, or returning values
+   from a const `X509 *` have been changed to take/return const
+   arguments. The most visible changes are places where pointer values
+   are returned from a const `X509 *` object. In many places where
+   these were non const values being returned from a const object,
+   these pointer values have now been made const. The goal of this
+   change is to enable future improvements in X.509 certificate
+   handling. For full details see the relevant section in
+   ossl-migration-guide(7).
 
-   * Bob Beck *
+   *Bob Beck*
 
  * The crypto-mdebug-backtrace configuration option has been entirely removed.
    The option has been a no-op since 1.0.2.
@@ -206,9 +320,11 @@ OpenSSL 4.0
    *Beat Bolli*
 
  * Added `ASN1_BIT_STRING_set1()` to set a bit string to a value including
-   the length in bytes and the number of unused bits.
+   the length in bytes and the number of unused bits. Internally,
+   `ASN1_BIT_STRING_set_bit()` has also been modified to keep the number of
+   unused bits correct when changing an `ASN1_BIT_STRING`.
 
-   * Bob Beck *
+   *Bob Beck*
 
  * The deprecated function `ASN1_STRING_data` has been removed.
 
@@ -239,6 +355,10 @@ OpenSSL 4.0
 
    *Daniel Kubec and Eugene Syromiatnikov*
 
+ * `X509_get0_distinguishing_id()` now takes and returns const objects.
+
+   *Bob Beck*
+
  * Added `-hmac-env` and `-hmac-stdin` options to openssl-dgst.
 
    *Igor Ustinov*
@@ -253,12 +373,13 @@ OpenSSL 4.0
    *Ryan Hooper*
 
  * Constify Various X509 functions:
-   X509_get_pathlen X509_check_ca X509_check_purpose X509_get_proxy_pathlen
-   X509_get_extension_flags X509_get_key_usage X509_get_extended_key_usage
-   X509_get0_subject_key_id X509_get0_authority_key_id X509_get0_authority_issuer
-   X509_get0_authority_serial.
+   `X509_get_pathlen()`, `X509_check_ca()`, `X509_check_purpose()`,
+   `X509_get_proxy_pathlen()`, `X509_get_extension_flags()`,
+   `X509_get_key_usage()`, `X509_get_extended_key_usage()`,
+   `X509_get0_subject_key_id()`, `X509_get0_authority_key_id()`,
+   `X509_get0_authority_issuer()`, `X509_get0_authority_serial()`.
 
-   * Bob Beck *
+   *Bob Beck*
 
  * Fixed CRLs with invalid `ASN1_TIME` in invalidityDate extensions,
    where verification incorrectly succeeded. Enforced proper
@@ -277,7 +398,7 @@ OpenSSL 4.0
    `X509_NAME_get_text_by_NID()`, and `X509_NAME_get_text_by_OBJ()` are now
    actually deprecated, and documented as such.
 
-   * Bob Beck *
+   *Bob Beck*
 
  * ENGINE support was removed. The `no-engine` build option and the
    `OPENSSL_NO_ENGINE` macro is always present.
@@ -328,18 +449,18 @@ OpenSSL 4.0
 
    *Stephen Farrell* (with much support from *Matt Caswell* and *Tomáš Mráz*)
 
- * X509_cmp_time, X509_cmp_current_time, and X509_cmp_timeframe have
+ * `X509_cmp_time()`, `X509_cmp_current_time()`, and `X509_cmp_timeframe()` have
    had documentation added, and have then been deprecated.  A new
-   function, X509_check_certificate_times has been added, as well as
-   the <openssl/posix_time.h> interface from BoringSSL/LibreSSL. For
+   function, `X509_check_certificate_times()` has been added, as well as
+   the `<openssl/posix_time.h>` interface from BoringSSL/LibreSSL. For
    details of these functions and non-deprecated replacement
-   strategies, see X509_check_certificate_times(3).
+   strategies, see `X509_check_certificate_times(3)`.
 
-   * Bob Beck *
+   *Bob Beck*
 
- * Added BIO_set_send_flags() function that allows setting flags passed to
+ * Added `BIO_set_send_flags()` function that allows setting flags passed to
    send(), sendto(), and sendmsg(). The main intention is to allow setting
-   the MSG_NOSIGNAL flag to avoid a crash on receiving the SIGPIPE signal.
+   the `MSG_NOSIGNAL` flag to avoid a crash on receiving the SIGPIPE signal.
 
    *Igor Ustinov*
 
@@ -518,6 +639,13 @@ OpenSSL 3.6
    stores between FIPS and non-FIPS implementations.
 
    *Dimitri John Ledkov*
+
+ * `SSL_add1_host()` and `SSL_set1_host()` were deprecated. The new replacement functions
+   `SSL_add1_dnsname()`, `SSL_set1_dnsname()`, `SSL_add1_ipaddr()`, and `SSL_set1_ipaddr()` were added.
+   API was added to support checking multiple names against a certificate with
+   `X509_VERIFY_PARAM`.  See `X509_VERIFY_PARAM_set_flags(3)` for full details.
+
+   *Bob Beck*
 
  * Added `X509_CRL_get0_tbs_sigalg()` accessor for the signature
    `AlgorithmIdentifier` inside CRL's `TBSCertList`.

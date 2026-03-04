@@ -37,7 +37,7 @@ int X509_CRL_get_ext_by_critical(const X509_CRL *x, int crit, int lastpos)
     return X509v3_get_ext_by_critical(x->crl.extensions, crit, lastpos);
 }
 
-X509_EXTENSION *X509_CRL_get_ext(const X509_CRL *x, int loc)
+const X509_EXTENSION *X509_CRL_get_ext(const X509_CRL *x, int loc)
 {
     return X509v3_get_ext(x->crl.extensions, loc);
 }
@@ -70,7 +70,7 @@ int X509_CRL_add1_ext_i2d(X509_CRL *x, int nid, void *value, int crit,
     return X509V3_add1_i2d(&x->crl.extensions, nid, value, crit, flags);
 }
 
-int X509_CRL_add_ext(X509_CRL *x, X509_EXTENSION *ex, int loc)
+int X509_CRL_add_ext(X509_CRL *x, const X509_EXTENSION *ex, int loc)
 {
     return (X509v3_add_ext(&(x->crl.extensions), ex, loc) != NULL);
 }
@@ -95,19 +95,44 @@ int X509_get_ext_by_critical(const X509 *x, int crit, int lastpos)
     return (X509v3_get_ext_by_critical(x->cert_info.extensions, crit, lastpos));
 }
 
-X509_EXTENSION *X509_get_ext(const X509 *x, int loc)
+const X509_EXTENSION *X509_get_ext(const X509 *x, int loc)
 {
     return X509v3_get_ext(x->cert_info.extensions, loc);
 }
 
 X509_EXTENSION *X509_delete_ext(X509 *x, int loc)
 {
-    return delete_ext(&x->cert_info.extensions, loc);
+    X509_EXTENSION *ret;
+
+    if (x->cert_info.extensions == NULL)
+        return NULL;
+    if ((ret = delete_ext(&x->cert_info.extensions, loc)) != NULL)
+        x->cert_info.enc.modified = 1;
+    return ret;
 }
 
-int X509_add_ext(X509 *x, X509_EXTENSION *ex, int loc)
+int X509_add_ext(X509 *x, const X509_EXTENSION *ex, int loc)
 {
-    return (X509v3_add_ext(&(x->cert_info.extensions), ex, loc) != NULL);
+    STACK_OF(X509_EXTENSION) *exts = x->cert_info.extensions;
+
+    if (X509v3_add_ext(&exts, ex, loc) == NULL)
+        return 0;
+    /*
+     * A duplicate empty SKID/AKID extension can displace a prior non-empty
+     * one, but is then not itself added, so, somewhat counter-intutively,  the
+     * the extension list can become empty after an "add", in which case we must
+     * drop the extension stack entirely, setting it to NULL.  The extensions
+     * list is either non-empty or absent.
+     */
+    if (sk_X509_EXTENSION_num(exts) != 0) {
+        x->cert_info.extensions = exts;
+    } else {
+        sk_X509_EXTENSION_free(exts);
+        sk_X509_EXTENSION_pop_free(x->cert_info.extensions, X509_EXTENSION_free);
+        x->cert_info.extensions = NULL;
+    }
+    x->cert_info.enc.modified = 1;
+    return 1;
 }
 
 void *X509_get_ext_d2i(const X509 *x, int nid, int *crit, int *idx)
@@ -118,6 +143,11 @@ void *X509_get_ext_d2i(const X509 *x, int nid, int *crit, int *idx)
 int X509_add1_ext_i2d(X509 *x, int nid, void *value, int crit,
     unsigned long flags)
 {
+    /*
+     * Assume modified, sadly the underlying function does not tell us whether
+     * changes were made, or not.
+     */
+    x->cert_info.enc.modified = 1;
     return X509V3_add1_i2d(&x->cert_info.extensions, nid, value, crit,
         flags);
 }
@@ -143,7 +173,7 @@ int X509_REVOKED_get_ext_by_critical(const X509_REVOKED *x, int crit, int lastpo
     return X509v3_get_ext_by_critical(x->extensions, crit, lastpos);
 }
 
-X509_EXTENSION *X509_REVOKED_get_ext(const X509_REVOKED *x, int loc)
+const X509_EXTENSION *X509_REVOKED_get_ext(const X509_REVOKED *x, int loc)
 {
     return X509v3_get_ext(x->extensions, loc);
 }

@@ -18,6 +18,8 @@
 #include "crypto/evp.h"
 #include "pk7_local.h"
 
+#include <crypto/asn1.h>
+
 static int add_attribute(STACK_OF(X509_ATTRIBUTE) **sk, int nid, int atrtype,
     void *value);
 static const ASN1_TYPE *get_attribute(const STACK_OF(X509_ATTRIBUTE) *sk, int nid);
@@ -977,7 +979,7 @@ int PKCS7_dataVerify(X509_STORE *cert_store, X509_STORE_CTX *ctx, BIO *bio,
     int ret = 0, i;
     STACK_OF(X509) *untrusted;
     STACK_OF(X509_CRL) *crls;
-    X509 *signer;
+    const X509 *signer;
 
     if (p7 == NULL) {
         ERR_raise(ERR_LIB_PKCS7, PKCS7_R_INVALID_NULL_POINTER);
@@ -1013,7 +1015,10 @@ int PKCS7_dataVerify(X509_STORE *cert_store, X509_STORE_CTX *ctx, BIO *bio,
     }
 
     /* Lets verify */
-    if (!X509_STORE_CTX_init(ctx, cert_store, signer, untrusted)) {
+    /*
+     * TODO: This cast can be removed when #30076 is merged
+     */
+    if (!X509_STORE_CTX_init(ctx, cert_store, (X509 *)signer, untrusted)) {
         ERR_raise(ERR_LIB_PKCS7, ERR_R_X509_LIB);
         goto err;
     }
@@ -1024,13 +1029,15 @@ int PKCS7_dataVerify(X509_STORE *cert_store, X509_STORE_CTX *ctx, BIO *bio,
         goto err;
     }
 
-    return PKCS7_signatureVerify(bio, p7, si, signer);
+    if (PKCS7_signatureVerify(bio, p7, si, signer) <= 0)
+        goto err;
+    ret = 1;
 err:
     return ret;
 }
 
 int PKCS7_signatureVerify(BIO *bio, PKCS7 *p7, PKCS7_SIGNER_INFO *si,
-    X509 *signer)
+    const X509 *signer)
 {
     ASN1_OCTET_STRING *os;
     EVP_MD_CTX *mdc_tmp, *mdc;

@@ -9,6 +9,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
+#include <stdint.h>
 
 #include <openssl/opensslconf.h>
 #include <openssl/quic.h>
@@ -21,6 +23,9 @@
 #include "../ssl/ssl_local.h"
 #include "../ssl/quic/quic_channel_local.h"
 #include "internal/quic_error.h"
+#include "internal/quic_ssl.h"
+#include "internal/quic_port.h"
+#include "internal/quic_txp.h"
 
 static OSSL_LIB_CTX *libctx = NULL;
 static char *propq = NULL;
@@ -39,6 +44,10 @@ static BIO_ADDR *create_addr(struct in_addr *ina, short int port);
 static int bio_addr_bind(BIO *bio, BIO_ADDR *addr);
 static SSL *ql_create(SSL_CTX *ssl_ctx, BIO *bio);
 static SSL_CTX *create_server_ctx(void);
+static SSL_CTX *create_client_ctx(void);
+static int create_quic_ssl_objects(SSL_CTX *sctx, SSL_CTX *cctx,
+    SSL **lssl, SSL **cssl);
+static void quic_advance_time(SSL *clientssl, SSL *serverssl);
 static int qc_init(SSL *qconn, BIO_ADDR *dst_addr);
 
 /* The ssltrace test assumes some options are switched on/off */
@@ -46,7 +55,7 @@ static int qc_init(SSL *qconn, BIO_ADDR *dst_addr);
     && defined(OPENSSL_NO_BROTLI) && defined(OPENSSL_NO_ZSTD)     \
     && !defined(OPENSSL_NO_ECX) && !defined(OPENSSL_NO_DH)        \
     && !defined(OPENSSL_NO_ML_DSA) && !defined(OPENSSL_NO_ML_KEM) \
-    && !defined(OPENSSL_NO_SM2)
+    && !defined(OPENSSL_NO_SLH_DSA) && !defined(OPENSSL_NO_SM2)
 #define DO_SSL_TRACE_TEST
 #endif
 
@@ -58,7 +67,7 @@ static int qc_init(SSL *qconn, BIO_ADDR *dst_addr);
  */
 static int test_quic_write_read(int idx)
 {
-    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL_CTX *cctx = NULL;
     SSL_CTX *sctx = NULL;
     SSL *clientquic = NULL;
     QUIC_TSERVER *qtserv = NULL;
@@ -74,6 +83,7 @@ static int test_quic_write_read(int idx)
     if (idx >= 1 && !qtest_supports_blocking())
         return TEST_skip("Blocking tests not supported in this build");
 
+    cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
     for (k = 0; k < 2; k++) {
         if (!TEST_ptr(cctx)
             || !TEST_true(qtest_create_quic_objects(libctx, cctx, sctx,
@@ -214,13 +224,97 @@ end:
     return ret;
 }
 
+static int test_ssl_read_key_update_mfail(void)
+{
+    SSL_CTX *cctx = NULL, *sctx = NULL;
+    SSL *clientssl = NULL, *serverssl = NULL, *qlistener = NULL;
+    QUIC_CHANNEL *sch = NULL;
+    int ret = 0, i;
+    const char *msg = "ping";
+    size_t msglen = strlen(msg);
+    size_t numbytes = 0;
+    unsigned char buf[64];
+
+    if (!TEST_ptr(sctx = create_server_ctx())
+        || !TEST_ptr(cctx = create_client_ctx()))
+        goto err;
+
+    if (!create_quic_ssl_objects(sctx, cctx, &qlistener, &clientssl))
+        goto err;
+
+    if (!TEST_true(SSL_set_tlsext_host_name(clientssl, "localhost")))
+        goto err;
+
+    /* Send ClientHello and server retry. */
+    for (i = 0; i < 2; i++) {
+        ret = SSL_connect(clientssl);
+        if (!TEST_int_le(ret, 0)
+            || !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+            goto err;
+        SSL_handle_events(qlistener);
+    }
+
+    serverssl = SSL_accept_connection(qlistener, 0);
+    if (!TEST_ptr(serverssl)
+        || !TEST_true(create_bare_ssl_connection(serverssl, clientssl,
+            SSL_ERROR_NONE, 0, 0)))
+        goto err;
+
+    if (!TEST_ptr(sch = ossl_quic_conn_get_channel(serverssl)))
+        goto err;
+
+    /* Open the default stream so the server has something to write back on. */
+    if (!TEST_true(SSL_write_ex(clientssl, msg, msglen, &numbytes))
+        || !TEST_size_t_eq(numbytes, msglen))
+        goto err;
+
+    /* Route the datagram to the server connection and let it consume it. */
+    SSL_handle_events(qlistener);
+    SSL_handle_events(serverssl);
+    if (!TEST_true(SSL_read_ex(serverssl, buf, sizeof(buf), &numbytes)))
+        goto err;
+
+    /*
+     * Force the server's TX side to rotate keys. Its next outgoing packet
+     * will carry the flipped Key Phase bit. When the client decrypts that
+     * packet, qrx_key_update_initiated -> rxku_detected -> ch_trigger_txku
+     * fires on the client.
+     */
+    if (!TEST_true(ossl_qtx_trigger_key_update(sch->qtx)))
+        goto err;
+
+    if (!TEST_true(SSL_write_ex(serverssl, msg, msglen, &numbytes))
+        || !TEST_size_t_eq(numbytes, msglen))
+        goto err;
+
+    /*
+     * Process the inbound packet (carrying the new Key Phase) under mfail.
+     * SSL_read_ex ticks the client, reads the datagram off its BIO and
+     * decrypts it, which is where the key update handling runs.
+     */
+    MFAIL_start();
+    ret = SSL_read_ex(clientssl, buf, sizeof(buf), &numbytes);
+    MFAIL_end();
+
+    ret = (ret > 0);
+
+err:
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(qlistener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+
+    return ret;
+}
+
 /*
  * Test that sending FIN with no data to a client blocking in SSL_read_ex() will
  * wake up the client.
  */
 static int test_fin_only_blocking(void)
 {
-    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL_CTX *cctx = NULL;
     SSL_CTX *sctx = NULL;
     SSL *clientquic = NULL;
     QUIC_TSERVER *qtserv = NULL;
@@ -234,6 +328,7 @@ static int test_fin_only_blocking(void)
     if (!qtest_supports_blocking())
         return TEST_skip("Blocking tests not supported in this build");
 
+    cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
     if (!TEST_ptr(cctx)
         || !TEST_true(qtest_create_quic_objects(libctx, cctx, sctx,
             cert, privkey,
@@ -1705,12 +1800,12 @@ static int test_bw_limit(void)
                     sendlen > TEST_SINGLE_WRITE_SIZE ? TEST_SINGLE_WRITE_SIZE
                                                      : sendlen,
                     &written)) {
-                TEST_info("Retrying to send: %llu", (unsigned long long)sendlen);
+                TEST_info("Retrying to send: %zu", sendlen);
                 if (!TEST_int_eq(SSL_get_error(clientquic, 0), SSL_ERROR_WANT_WRITE))
                     goto err;
             } else {
                 sendlen -= written;
-                TEST_info("Remaining to send: %llu", (unsigned long long)sendlen);
+                TEST_info("Remaining to send: %zu", sendlen);
             }
         } else {
             SSL_handle_events(clientquic);
@@ -1722,9 +1817,9 @@ static int test_bw_limit(void)
                 &readbytes)
             && readbytes > 1) {
             recvlen -= readbytes;
-            TEST_info("Remaining to recv: %llu", (unsigned long long)recvlen);
+            TEST_info("Remaining to recv: %zu", recvlen);
         } else {
-            TEST_info("No progress on recv: %llu", (unsigned long long)recvlen);
+            TEST_info("No progress on recv: %zu", recvlen);
         }
         ossl_quic_tserver_tick(qtserv);
     }
@@ -2334,7 +2429,9 @@ static int test_domain_flags(void)
 {
     int testresult = 0;
     SSL_CTX *ctx = NULL;
-    SSL *domain = NULL, *listener = NULL, *other_conn = NULL;
+    SSL *inherited_domain = NULL, *domain = NULL, *listener = NULL;
+    SSL *listener_conn = NULL;
+    SSL *other_conn = NULL;
     uint64_t domain_flags = 0;
 
     if (!TEST_ptr(ctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method()))
@@ -2342,15 +2439,19 @@ static int test_domain_flags(void)
         || !TEST_uint64_t_ne(domain_flags, 0)
         || !TEST_uint64_t_ne(domain_flags & (SSL_DOMAIN_FLAG_SINGLE_THREAD | SSL_DOMAIN_FLAG_MULTI_THREAD), 0)
         || !TEST_uint64_t_ne(domain_flags & SSL_DOMAIN_FLAG_LEGACY_BLOCKING, 0)
-        || !TEST_true(SSL_CTX_set_domain_flags(ctx, SSL_DOMAIN_FLAG_SINGLE_THREAD))
+        || !TEST_true(SSL_CTX_set_domain_flags(ctx, SSL_DOMAIN_FLAG_MULTI_THREAD))
         || !TEST_true(SSL_CTX_get_domain_flags(ctx, &domain_flags))
-        || !TEST_uint64_t_eq(domain_flags, SSL_DOMAIN_FLAG_SINGLE_THREAD)
-        || !TEST_ptr(domain = SSL_new_domain(ctx, 0))
+        || !TEST_uint64_t_eq(domain_flags, SSL_DOMAIN_FLAG_MULTI_THREAD)
+        || !TEST_ptr(inherited_domain = SSL_new_domain(ctx, 0))
+        || !TEST_true(SSL_get_domain_flags(inherited_domain, &domain_flags))
+        || !TEST_uint64_t_eq(domain_flags, SSL_DOMAIN_FLAG_MULTI_THREAD)
+        || !TEST_ptr(domain = SSL_new_domain(ctx,
+                         SSL_DOMAIN_FLAG_SINGLE_THREAD))
         || !TEST_true(SSL_get_domain_flags(domain, &domain_flags))
         || !TEST_uint64_t_eq(domain_flags, SSL_DOMAIN_FLAG_SINGLE_THREAD)
         || !TEST_true(other_conn = SSL_new(ctx))
         || !TEST_true(SSL_get_domain_flags(other_conn, &domain_flags))
-        || !TEST_uint64_t_eq(domain_flags, SSL_DOMAIN_FLAG_SINGLE_THREAD)
+        || !TEST_uint64_t_eq(domain_flags, SSL_DOMAIN_FLAG_MULTI_THREAD)
         || !TEST_true(SSL_is_domain(domain))
         || !TEST_false(SSL_is_domain(other_conn))
         || !TEST_ptr_eq(SSL_get0_domain(domain), domain)
@@ -2359,13 +2460,22 @@ static int test_domain_flags(void)
         || !TEST_true(SSL_is_listener(listener))
         || !TEST_false(SSL_is_domain(listener))
         || !TEST_ptr_eq(SSL_get0_domain(listener), domain)
-        || !TEST_ptr_eq(SSL_get0_listener(listener), listener))
+        || !TEST_ptr_eq(SSL_get0_listener(listener), listener)
+        || !TEST_true(SSL_get_domain_flags(listener, &domain_flags))
+        || !TEST_uint64_t_eq(domain_flags, SSL_DOMAIN_FLAG_SINGLE_THREAD)
+        || !TEST_ptr(listener_conn = SSL_new_from_listener(listener, 0))
+        || !TEST_ptr_eq(SSL_get0_domain(listener_conn), domain)
+        || !TEST_ptr_eq(SSL_get0_listener(listener_conn), listener)
+        || !TEST_true(SSL_get_domain_flags(listener_conn, &domain_flags))
+        || !TEST_uint64_t_eq(domain_flags, SSL_DOMAIN_FLAG_SINGLE_THREAD))
         goto err;
 
     testresult = 1;
 err:
-    SSL_free(domain);
+    SSL_free(listener_conn);
     SSL_free(listener);
+    SSL_free(domain);
+    SSL_free(inherited_domain);
     SSL_free(other_conn);
     SSL_CTX_free(ctx);
     return testresult;
@@ -2598,6 +2708,84 @@ err:
     return testresult;
 }
 
+/*
+ * Verify that the SSL* received in the info callback after SSL_new_from_listener
+ * is the outer QUIC connection object, not the inner TLS SSL.
+ */
+static SSL *new_from_listener_info_cb_ssl = NULL;
+
+static void new_from_listener_info_cb(const SSL *ssl, int type, int val)
+{
+    if (type == SSL_CB_HANDSHAKE_DONE)
+        new_from_listener_info_cb_ssl = (SSL *)ssl;
+}
+
+static int test_ssl_new_from_listener_user_ssl(void)
+{
+    SSL_CTX *lctx = NULL, *sctx = NULL;
+    SSL *qlistener = NULL, *qserver = NULL, *qconn = NULL;
+    BIO *lbio = NULL, *sbio = NULL;
+    BIO_ADDR *addr = NULL;
+    struct in_addr ina;
+    int ret = 0, chk;
+
+    ina.s_addr = htonl(0x1f000001);
+    new_from_listener_info_cb_ssl = NULL;
+
+    if (!TEST_ptr(lctx = create_server_ctx())
+        || !TEST_ptr(sctx = create_server_ctx())
+        || !TEST_true(BIO_new_bio_dgram_pair(&lbio, 0, &sbio, 0)))
+        goto err;
+
+    /*
+     * Register an info callback on the listener CTX. The inner TLS connection
+     * created by ossl_quic_new_from_listener inherits this CTX, so when the TLS
+     * handshake completes it invokes the callback with user_ssl. That must be
+     * qconn (the outer QUIC object), not the inner TLS SSL object.
+     */
+    SSL_CTX_set_info_callback(lctx, new_from_listener_info_cb);
+
+    if (!TEST_ptr(addr = create_addr(&ina, 8041))
+        || !TEST_true(bio_addr_bind(lbio, addr)))
+        goto err;
+    addr = NULL;
+
+    if (!TEST_ptr(addr = create_addr(&ina, 4081))
+        || !TEST_true(bio_addr_bind(sbio, addr)))
+        goto err;
+    addr = NULL;
+
+    qlistener = ql_create(lctx, lbio);
+    lbio = NULL;
+    qserver = ql_create(sctx, sbio);
+    sbio = NULL;
+    if (!TEST_ptr(qlistener) || !TEST_ptr(qserver)
+        || !TEST_ptr(qconn = SSL_new_from_listener(qlistener, 0))
+        || !TEST_ptr(addr = create_addr(&ina, 4081))
+        || !TEST_true(qc_init(qconn, addr)))
+        goto err;
+
+    while ((chk = SSL_do_handshake(qconn)) == -1) {
+        SSL_handle_events(qserver);
+        SSL_handle_events(qlistener);
+    }
+
+    ret = TEST_int_gt(chk, 0)
+        && TEST_ptr(new_from_listener_info_cb_ssl)
+        && TEST_ptr_eq(new_from_listener_info_cb_ssl, qconn);
+
+err:
+    SSL_free(qconn);
+    SSL_free(qlistener);
+    SSL_free(qserver);
+    BIO_free(lbio);
+    BIO_free(sbio);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(lctx);
+    BIO_ADDR_free(addr);
+    return ret;
+}
+
 static int test_server_method_with_ssl_new(void)
 {
     SSL_CTX *ctx = NULL;
@@ -2630,8 +2818,16 @@ end:
     return ret;
 }
 
-static int create_quic_ssl_objects(SSL_CTX *sctx, SSL_CTX *cctx,
-    SSL **lssl, SSL **cssl)
+/* Fake clock for tests that advance QUIC time without consuming real time. */
+static OSSL_TIME fake_now;
+
+static OSSL_TIME fake_now_cb(void *arg)
+{
+    return fake_now;
+}
+
+static int create_quic_ssl_objects_ex(SSL_CTX *sctx, SSL_CTX *cctx,
+    SSL *domain, SSL **lssl, SSL **cssl, int use_fake_time)
 {
     BIO_ADDR *addr = NULL;
     struct in_addr ina;
@@ -2651,10 +2847,19 @@ static int create_quic_ssl_objects(SSL_CTX *sctx, SSL_CTX *cctx,
         goto err;
     addr = NULL;
 
-    *lssl = ql_create(sctx, sbio);
-    sbio = NULL;
-    if (!TEST_ptr(*lssl))
-        goto err;
+    if (domain == NULL) {
+        *lssl = ql_create(sctx, sbio);
+        sbio = NULL;
+        if (!TEST_ptr(*lssl))
+            goto err;
+    } else {
+        if (!TEST_ptr(*lssl = SSL_new_listener_from(domain, 0)))
+            goto err;
+        SSL_set_bio(*lssl, sbio, sbio);
+        sbio = NULL;
+        if (!TEST_true(SSL_listen(*lssl)))
+            goto err;
+    }
 
     if (!TEST_ptr(*cssl = SSL_new(cctx)))
         goto err;
@@ -2672,6 +2877,18 @@ static int create_quic_ssl_objects(SSL_CTX *sctx, SSL_CTX *cctx,
     SSL_set_bio(*cssl, cbio, cbio);
     cbio = NULL;
 
+    if (use_fake_time) {
+        /*
+         * The base value does not matter but must be nonzero, as the ACK
+         * manager reads a zero packet timestamp as unset. Use real time to
+         * match the clock the engines were created with.
+         */
+        fake_now = ossl_time_now();
+        if (!TEST_true(ossl_quic_set_override_now_cb(*lssl, fake_now_cb, NULL))
+            || !TEST_true(ossl_quic_set_override_now_cb(*cssl, fake_now_cb, NULL)))
+            goto err;
+    }
+
     ret = 1;
 
 err:
@@ -2685,6 +2902,75 @@ err:
     BIO_ADDR_free(addr);
 
     return ret;
+}
+
+static int create_quic_ssl_objects(SSL_CTX *sctx, SSL_CTX *cctx,
+    SSL **lssl, SSL **cssl)
+{
+    return create_quic_ssl_objects_ex(sctx, cctx, NULL, lssl, cssl, 0);
+}
+
+static int queue_incoming_connection(SSL *qlistener, SSL *clientssl)
+{
+    int i, ret;
+
+    for (i = 0; i < 5; i++) {
+        ret = SSL_connect(clientssl);
+        if (!TEST_int_le(ret, 0)
+            || !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+            return 0;
+
+        SSL_handle_events(qlistener);
+        if (SSL_get_accept_connection_queue_len(qlistener) == 1)
+            break;
+    }
+
+    return TEST_size_t_eq(SSL_get_accept_connection_queue_len(qlistener), 1);
+}
+
+static SSL *listen_ex_msg_cb_ssl;
+static char listen_ex_msg_cb_arg;
+static unsigned int listen_ex_tls_msg_count;
+static unsigned int listen_ex_quic_msg_count;
+static int listen_ex_msg_cb_mismatch;
+
+static void listen_ex_msg_cb(int write_p, int version, int content_type,
+    const void *buf, size_t len, SSL *ssl, void *arg)
+{
+    (void)write_p;
+    (void)version;
+    (void)buf;
+    (void)len;
+
+    if (ssl != listen_ex_msg_cb_ssl || arg != &listen_ex_msg_cb_arg)
+        listen_ex_msg_cb_mismatch = 1;
+
+    if (content_type == SSL3_RT_HANDSHAKE)
+        ++listen_ex_tls_msg_count;
+
+    switch (content_type) {
+    case SSL3_RT_QUIC_DATAGRAM:
+    case SSL3_RT_QUIC_PACKET:
+    case SSL3_RT_QUIC_FRAME_FULL:
+    case SSL3_RT_QUIC_FRAME_HEADER:
+    case SSL3_RT_QUIC_FRAME_PADDING:
+        ++listen_ex_quic_msg_count;
+        break;
+    default:
+        break;
+    }
+}
+
+static int listen_ex_rejects_new_conn(SSL *qlistener, SSL *new_conn)
+{
+    int ret = SSL_listen_ex(qlistener, new_conn);
+    unsigned long err = ERR_get_error();
+    int ok = TEST_int_eq(ret, -1)
+        && TEST_int_eq(ERR_GET_REASON(err), ERR_R_PASSED_INVALID_ARGUMENT)
+        && TEST_size_t_eq(SSL_get_accept_connection_queue_len(qlistener), 1);
+
+    ERR_clear_error();
+    return ok;
 }
 
 static int test_ssl_client_as_ossl_quic_method(void)
@@ -2755,58 +3041,248 @@ err:
 
 static int test_ssl_listen_ex(void)
 {
-    SSL_CTX *cctx = NULL, *sctx = NULL, *qmctx = NULL;
+    SSL_CTX *cctx = NULL, *sctx = NULL, *qmctx = NULL, *threadctx = NULL;
     SSL *clientssl = NULL, *serverssl = NULL, *qlistener = NULL;
+    SSL *domain = NULL;
+    SSL *preconf = NULL, *prestream = NULL, *threadssl = NULL;
+    SSL *cstream = NULL, *sstream = NULL;
+    BIO *confbio = NULL;
+    unsigned char buf[16], msg[] = "Hello, World!";
+    size_t readbytes, written;
+    uint64_t listener_domain_flags, target_domain_flags;
+    uint64_t connection_domain_flags, stream_domain_flags;
+    uint64_t event_handling_mode;
+    long listener_mode, target_mode;
     int testresult = 0;
     int ret = 0, i;
 
     if (!TEST_ptr(sctx = create_server_ctx())
-        || !TEST_ptr(cctx = create_client_ctx()))
+        || !TEST_ptr(cctx = create_client_ctx())
+        || !TEST_true(SSL_CTX_set_domain_flags(sctx,
+            SSL_DOMAIN_FLAG_MULTI_THREAD)))
         goto err;
 
-    if (!create_quic_ssl_objects(sctx, cctx, &qlistener, &clientssl))
+    listener_mode = SSL_CTX_set_mode(sctx, SSL_MODE_ENABLE_PARTIAL_WRITE);
+    SSL_CTX_set_msg_callback(sctx, listen_ex_msg_cb);
+    SSL_CTX_set_msg_callback_arg(sctx, &listen_ex_msg_cb_arg);
+
+    if (!TEST_ptr(domain = SSL_new_domain(sctx,
+                      SSL_DOMAIN_FLAG_MULTI_THREAD))
+        || !create_quic_ssl_objects_ex(sctx, cctx, domain,
+            &qlistener, &clientssl, 1))
         goto err;
 
     qmctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_method());
-    if (!TEST_ptr(qmctx))
+    if (!TEST_ptr(qmctx)
+        || !TEST_true(SSL_CTX_set_domain_flags(qmctx,
+            SSL_DOMAIN_FLAG_SINGLE_THREAD)))
         goto err;
 
+    SSL_CTX_set_mode(qmctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
     serverssl = SSL_new(qmctx);
     if (!TEST_ptr(serverssl))
         goto err;
 
-    /* Send ClientHello and server retry */
-    for (i = 0; i < 5; i++) {
-        ret = SSL_connect(clientssl);
-        if (!TEST_int_le(ret, 0)
-            || !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+    SSL_clear_mode(serverssl, SSL_MODE_ENABLE_PARTIAL_WRITE);
+    if (!TEST_true(SSL_set_event_handling_mode(serverssl,
+            SSL_VALUE_EVENT_HANDLING_MODE_EXPLICIT)))
+        goto err;
+    target_mode = SSL_get_mode(serverssl);
+    listen_ex_msg_cb_ssl = serverssl;
+    listen_ex_tls_msg_count = 0;
+    listen_ex_quic_msg_count = 0;
+    listen_ex_msg_cb_mismatch = 0;
+
+    if (!TEST_int_eq(SSL_listen_ex(NULL, serverssl), -1)
+        || !TEST_true(ERR_GET_REASON(ERR_get_error())
+            == ERR_R_PASSED_INVALID_ARGUMENT)
+        || !TEST_int_eq(SSL_listen_ex(qlistener, serverssl), 0)
+        || !queue_incoming_connection(qlistener, clientssl)
+        || !TEST_true(SSL_get_domain_flags(qlistener,
+            &listener_domain_flags))
+        || !TEST_true(SSL_get_domain_flags(serverssl,
+            &target_domain_flags))
+        || !TEST_uint64_t_ne(listener_domain_flags, target_domain_flags)
+        || !TEST_long_ne(listener_mode, target_mode))
+        goto err;
+    ERR_clear_error();
+
+#if defined(OPENSSL_THREADS) && !defined(OPENSSL_NO_THREAD_POOL) \
+    && !defined(OPENSSL_NO_QUIC_THREAD_ASSIST)
+    /* Thread assistance can't be transferred to an accepted connection. */
+    threadctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_method());
+    if (!TEST_ptr(threadctx)
+        || !TEST_true(SSL_CTX_set_domain_flags(threadctx,
+            SSL_DOMAIN_FLAG_THREAD_ASSISTED | SSL_DOMAIN_FLAG_BLOCKING))
+        || !TEST_ptr(threadssl = SSL_new(threadctx))
+        || !listen_ex_rejects_new_conn(qlistener, threadssl))
+        goto err;
+
+    SSL_free(threadssl);
+    threadssl = NULL;
+#endif
+
+    /* A connection which has already been started is not fresh. */
+    if (!listen_ex_rejects_new_conn(qlistener, clientssl))
+        goto err;
+
+    /* A connection which belongs to this listener isn't standalone. */
+    preconf = SSL_new_from_listener(qlistener, 0);
+    if (!TEST_ptr(preconf)
+        || !listen_ex_rejects_new_conn(qlistener, preconf))
+        goto err;
+
+    SSL_free(preconf);
+    preconf = NULL;
+
+    /* Network BIOs may not already be attached. */
+    preconf = SSL_new(qmctx);
+    if (!TEST_ptr(preconf)
+        || !TEST_ptr(confbio = BIO_new(BIO_s_mem())))
+        goto err;
+    SSL_set_bio(preconf, confbio, confbio);
+    confbio = NULL;
+    if (!listen_ex_rejects_new_conn(qlistener, preconf))
+        goto err;
+
+    SSL_free(preconf);
+    preconf = NULL;
+
+    /* Streams may not already have been created. */
+    preconf = SSL_new(qmctx);
+    if (!TEST_ptr(preconf)
+        || !TEST_ptr(prestream = SSL_new_stream(preconf,
+                         SSL_STREAM_FLAG_ADVANCE))
+        || !listen_ex_rejects_new_conn(qlistener, preconf))
+        goto err;
+
+    SSL_free(prestream);
+    prestream = NULL;
+    SSL_free(preconf);
+    preconf = NULL;
+
+    if (!TEST_int_eq(SSL_listen_ex(qlistener, serverssl), 1)
+        || !TEST_size_t_eq(SSL_get_accept_connection_queue_len(qlistener), 0)
+        || !TEST_true(SSL_get_domain_flags(serverssl,
+            &connection_domain_flags))
+        || !TEST_uint64_t_eq(connection_domain_flags,
+            listener_domain_flags)
+        || !TEST_ptr_eq(SSL_get0_domain(serverssl), domain)
+        || !TEST_ptr_eq(SSL_get0_listener(serverssl), qlistener)
+        || !TEST_long_eq(SSL_get_mode(serverssl), listener_mode)
+        || !TEST_true(SSL_get_event_handling_mode(serverssl,
+            &event_handling_mode))
+        || !TEST_uint64_t_eq(event_handling_mode,
+            SSL_VALUE_EVENT_HANDLING_MODE_INHERIT))
+        goto err;
+
+    if (!TEST_ptr_null(SSL_accept_connection(qlistener, 0))
+        || !TEST_true(ERR_GET_REASON(ERR_get_error())
+            == ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED))
+        goto err;
+    ERR_clear_error();
+
+    /* The adopted connection keeps the listener hierarchy alive. */
+    SSL_free(qlistener);
+    qlistener = NULL;
+    SSL_free(domain);
+    domain = NULL;
+
+    for (i = 0; i < 10; i++) {
+        ret = SSL_do_handshake(serverssl);
+        if (ret != 1
+            && !TEST_int_eq(SSL_get_error(serverssl, ret), SSL_ERROR_WANT_READ))
             goto err;
-        ret = SSL_listen_ex(qlistener, serverssl);
-        if (ret == 1)
+
+        ret = SSL_connect(clientssl);
+        if (ret != 1
+            && !TEST_int_eq(SSL_get_error(clientssl, ret), SSL_ERROR_WANT_READ))
+            goto err;
+
+        if (SSL_is_init_finished(serverssl) && SSL_is_init_finished(clientssl))
             break;
-        SSL_handle_events(qlistener);
+        quic_advance_time(clientssl, serverssl);
     }
 
-    /*
-     * Check to make sure we got a good return code from SSL_listen_ex
-     */
-    if (!TEST_int_eq(ret, 1))
+    if (!TEST_int_lt(i, 10)
+        || !TEST_true(SSL_is_init_finished(serverssl))
+        || !TEST_true(SSL_is_init_finished(clientssl)))
         goto err;
 
-    /* Call SSL_accept() and SSL_connect() until we are connected */
-    if (!TEST_true(create_bare_ssl_connection(serverssl, clientssl, SSL_ERROR_NONE, 0, 0)))
-
-        /*
-         * Ensure that, now that we have used SSL_listen_ex, SSL_accept_connection
-         * produces an error
-         */
-        if (!TEST_ptr_null(SSL_accept_connection(qlistener, 0)))
-            goto err;
-
-    if (!TEST_true((ERR_GET_REASON(ERR_get_error())) == ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED))
+    if (!TEST_true(SSL_set_default_stream_mode(serverssl,
+            SSL_DEFAULT_STREAM_MODE_NONE))
+        || !TEST_true(SSL_set_default_stream_mode(clientssl,
+            SSL_DEFAULT_STREAM_MODE_NONE))
+        || !TEST_ptr(cstream = SSL_new_stream(clientssl, 0))
+        || !TEST_true(SSL_write_ex(cstream, msg, sizeof(msg), &written))
+        || !TEST_size_t_eq(written, sizeof(msg))
+        || !TEST_int_eq(SSL_handle_events(serverssl), 1))
         goto err;
 
-    ERR_clear_error();
+    sstream = SSL_accept_stream(serverssl, 0);
+    if (!TEST_ptr(sstream)
+        || !TEST_true(SSL_get_domain_flags(sstream, &stream_domain_flags))
+        || !TEST_uint64_t_eq(stream_domain_flags, listener_domain_flags)
+        || !TEST_ptr_eq(SSL_get0_domain(sstream),
+            SSL_get0_domain(serverssl))
+        || !TEST_ptr_eq(SSL_get0_listener(sstream),
+            SSL_get0_listener(serverssl))
+        || !TEST_true(SSL_read_ex(sstream, buf, sizeof(buf), &readbytes))
+        || !TEST_size_t_eq(readbytes, sizeof(msg))
+        || !TEST_mem_eq(buf, readbytes, msg, sizeof(msg))
+        || !TEST_true(SSL_write_ex(sstream, msg, sizeof(msg), &written))
+        || !TEST_size_t_eq(written, sizeof(msg))
+        || !TEST_true(SSL_read_ex(cstream, buf, sizeof(buf), &readbytes))
+        || !TEST_size_t_eq(readbytes, sizeof(msg))
+        || !TEST_mem_eq(buf, readbytes, msg, sizeof(msg)))
+        goto err;
+
+    if (!TEST_uint_gt(listen_ex_tls_msg_count, 0)
+        || !TEST_uint_gt(listen_ex_quic_msg_count, 0)
+        || !TEST_false(listen_ex_msg_cb_mismatch))
+        goto err;
+
+    testresult = 1;
+
+err:
+    SSL_free(sstream);
+    SSL_free(cstream);
+    SSL_free(prestream);
+    SSL_free(preconf);
+    SSL_free(threadssl);
+    BIO_free(confbio);
+    SSL_free(qlistener);
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(domain);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    SSL_CTX_free(qmctx);
+    SSL_CTX_free(threadctx);
+    listen_ex_msg_cb_ssl = NULL;
+
+    return testresult;
+}
+
+/* Free a listener which still owns a deferred, unpeeled channel. */
+static int test_ssl_listen_ex_teardown(void)
+{
+    SSL_CTX *cctx = NULL, *sctx = NULL, *qmctx = NULL;
+    SSL *clientssl = NULL, *serverssl = NULL, *qlistener = NULL;
+    int testresult = 0;
+
+    if (!TEST_ptr(sctx = create_server_ctx())
+        || !TEST_ptr(cctx = create_client_ctx())
+        || !create_quic_ssl_objects_ex(sctx, cctx, NULL,
+            &qlistener, &clientssl, 1)
+        || !TEST_ptr(qmctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_method()))
+        || !TEST_ptr(serverssl = SSL_new(qmctx))
+        || !TEST_int_eq(SSL_listen_ex(qlistener, serverssl), 0)
+        || !queue_incoming_connection(qlistener, clientssl))
+        goto err;
+
+    SSL_free(qlistener);
+    qlistener = NULL;
     testresult = 1;
 
 err:
@@ -2816,7 +3292,61 @@ err:
     SSL_CTX_free(sctx);
     SSL_CTX_free(cctx);
     SSL_CTX_free(qmctx);
+    return testresult;
+}
 
+/* Internal failures are errors and must not consume the queued channel. */
+static int test_ssl_listen_ex_mfail(void)
+{
+    SSL_CTX *cctx = NULL, *sctx = NULL, *qmctx = NULL;
+    SSL *clientssl = NULL, *serverssl = NULL, *qlistener = NULL;
+    int testresult = 0, ret;
+
+    if (!TEST_ptr(sctx = create_server_ctx())
+        || !TEST_ptr(cctx = create_client_ctx())
+        || !create_quic_ssl_objects_ex(sctx, cctx, NULL,
+            &qlistener, &clientssl, 1)
+        || !TEST_ptr(qmctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_method()))
+        || !TEST_ptr(serverssl = SSL_new(qmctx))
+        || !TEST_int_eq(SSL_listen_ex(qlistener, serverssl), 0)
+        || !queue_incoming_connection(qlistener, clientssl))
+        goto err;
+
+    MFAIL_start();
+    ret = SSL_listen_ex(qlistener, serverssl);
+    MFAIL_end();
+    ERR_clear_error();
+
+    if (mfail_was_triggered()) {
+        if (!TEST_int_eq(ret, -1)
+            || !TEST_size_t_eq(SSL_get_accept_connection_queue_len(qlistener), 1)) {
+            /* ADD_MFAIL_NO_CHECK_TEST treats -1 as an unconditional failure. */
+            testresult = -1;
+            goto err;
+        }
+
+        ERR_clear_error();
+        if (!TEST_int_eq(SSL_listen_ex(qlistener, serverssl), 1)
+            || !TEST_size_t_eq(
+                SSL_get_accept_connection_queue_len(qlistener), 0)) {
+            testresult = -1;
+            goto err;
+        }
+    } else if (!TEST_int_eq(ret, 1)
+        || !TEST_size_t_eq(SSL_get_accept_connection_queue_len(qlistener), 0)) {
+        goto err;
+    }
+
+    testresult = 1;
+
+err:
+    MFAIL_end();
+    SSL_free(qlistener);
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+    SSL_CTX_free(qmctx);
     return testresult;
 }
 
@@ -2869,6 +3399,344 @@ err:
     SSL_CTX_free(cctx);
 
     return testresult;
+}
+
+#define CLIENT_PORT 4080
+#define SERVER_PORT 8040
+#define QUIC_MDPL 1200
+#define EXTRA_CERTS 40
+
+static int wait_readable(BIO *b, int timeout_ms)
+{
+    uint64_t expire = ossl_time2ticks(ossl_ms2time(ossl_time2ms(ossl_time_now()) + timeout_ms));
+    uint64_t now;
+
+    for (;;) {
+        if (BIO_pending(b))
+            break;
+        now = ossl_time2ticks(ossl_time_now());
+        if (now > expire)
+            return 0;
+    }
+    return 1;
+}
+
+static int drain_server_output(BIO *b, uint64_t *total,
+    size_t *num_datagrams)
+{
+    unsigned char buf[65536];
+    BIO_MSG msg = { 0 };
+    size_t num_processed;
+    int ret = 0;
+
+    for (;;) {
+        msg.data = buf;
+        msg.data_len = 65535;
+        num_processed = 0;
+        if (!BIO_recvmmsg(b, &msg, 1, 1, 0, &num_processed)) {
+            return !!ret;
+        } else {
+            *total += msg.data_len;
+            *num_datagrams += num_processed;
+            ret++;
+            continue;
+        }
+    }
+}
+
+static int send_coalesced_initial(OSSL_QTX *qtx, QUIC_PKT_HDR *hdr,
+    const BIO_ADDR *peer, uint64_t first_pn)
+{
+    static const unsigned char one_padding[1];
+    static const unsigned char final_padding[23];
+    OSSL_QTX_IOVEC iovec = { 0 };
+    OSSL_QTX_PKT pkt = { 0 };
+    size_t i;
+
+    pkt.hdr = hdr;
+    pkt.iovec = &iovec;
+    pkt.num_iovec = 1;
+    pkt.peer = peer;
+
+    /* 30 * 38-byte packets + one 60-byte packet = one 1200-byte datagram. */
+    for (i = 0; i < 31; ++i) {
+        iovec.buf = i < 30 ? one_padding : final_padding;
+        iovec.buf_len = i < 30 ? sizeof(one_padding) : sizeof(final_padding);
+        pkt.pn = first_pn + i;
+        pkt.flags = i < 30 ? OSSL_QTX_PKT_FLAG_COALESCE : 0;
+        if (!ossl_qtx_write_pkt(qtx, &pkt))
+            return 0;
+    }
+
+    if (ossl_qtx_get_queue_len_datagrams(qtx) != 1
+        || ossl_qtx_get_queue_len_bytes(qtx) != QUIC_MDPL) {
+        TEST_info("crafted queue has %zu datagrams / %zu bytes, "
+                  "expected 1 / %d",
+            ossl_qtx_get_queue_len_datagrams(qtx),
+            ossl_qtx_get_queue_len_bytes(qtx), QUIC_MDPL);
+        return 0;
+    }
+
+    if (ossl_qtx_flush_net(qtx) != QTX_FLUSH_NET_RES_OK) {
+        TEST_info("failed to flush crafted datagram");
+        return 0;
+    }
+
+    return 1;
+}
+
+/*
+ * Test that we don't exceed our amplification limit when a peer
+ * sends coalesced frames
+ */
+static int test_quic_amplification_limit(void)
+{
+    SSL_CTX *sctx = NULL, *cctx = NULL;
+    SSL *listener = NULL, *client = NULL, *server = NULL;
+    QUIC_CHANNEL *cch = NULL, *sch = NULL;
+    OSSL_QTX *inject_qtx = NULL;
+    OSSL_QTX_ARGS qtx_args = { 0 };
+    QUIC_PKT_HDR hdr = { 0 };
+    BIO_ADDR *server_addr = NULL, *client_addr = NULL;
+    BIO_ADDR *shadow_server_addr = NULL;
+    int rc, ssl_err, i, ret = 0;
+    uint64_t server_bytes = 0;
+    size_t server_datagrams = 0;
+    uint64_t first_injected_pn;
+    const uint64_t client_bytes = 2 * QUIC_MDPL;
+    const uint64_t rfc_ceiling = 3 * client_bytes;
+    struct in_addr ina;
+    static const unsigned char alpn[] = { 8, 'o', 's', 's', 'l', 't', 'e', 's', 't' };
+    X509 *chain_cert = NULL;
+    BIO *c_bio = NULL, *s_bio = NULL;
+
+    sctx = create_server_ctx();
+    cctx = create_client_ctx();
+    if (!TEST_ptr(sctx) || !TEST_ptr(cctx))
+        goto err;
+
+    /*
+     * Ensure that we better know the form of the handshake messages sent
+     * we set the groups and ciphersuites so we know how big the client and server
+     * hello frames will be so the math for adding and draining credit is
+     * predictable
+     */
+    if (!TEST_true(SSL_CTX_set_options(cctx, SSL_OP_NO_RX_CERTIFICATE_COMPRESSION))
+        || !TEST_true(SSL_CTX_set_options(sctx, SSL_OP_NO_TX_CERTIFICATE_COMPRESSION)))
+        goto err;
+
+    if (!TEST_true(SSL_CTX_set1_groups_list(sctx, "X25519"))
+        || !TEST_true(SSL_CTX_set1_groups_list(cctx, "X25519"))) {
+        TEST_skip("Skipping amplification test due to lack of X25519 group");
+        ret = 1;
+        goto err;
+    }
+    if (!TEST_true(SSL_CTX_set_ciphersuites(sctx, "TLS_AES_128_GCM_SHA256"))
+        || !TEST_true(SSL_CTX_set_ciphersuites(cctx, "TLS_AES_128_GCM_SHA256"))) {
+        TEST_skip("Skipping amplification test due to lack of aes-128-gcm-sha256 cipher");
+        ret = 1;
+        goto err;
+    }
+
+    /*
+     * We're going to send a set of extra certs that don't create a valid
+     * verification chain, so don't bother verifying
+     */
+    SSL_CTX_set_verify(sctx, SSL_VERIFY_NONE, NULL);
+    SSL_CTX_set_verify(cctx, SSL_VERIFY_NONE, NULL);
+
+    if (!TEST_true(SSL_CTX_check_private_key(sctx)))
+        goto err;
+
+    /*
+     * Get out leaf certificate and add it 40 times as extra_certs.
+     * This makes our server hello large, so that we drain our unvalidated
+     * credit on the server in response to the initial client hello
+     */
+    chain_cert = SSL_CTX_get0_certificate(sctx);
+
+    for (i = 0; i < EXTRA_CERTS; ++i) {
+        if (!TEST_int_eq(X509_up_ref(chain_cert), 1))
+            goto err;
+        if (!TEST_int_eq(SSL_CTX_add_extra_chain_cert(sctx, chain_cert), 1))
+            goto err;
+    }
+
+    /*
+     * Create a bio dgram pair, and attach them to the client and server ssl objects.
+     * We do this so we have access to the bios and can inject and drain frames as needed.
+     * Also, its important to make the bio ring buffer sizes large enough so that we don't
+     * accidentally drop frames.
+     */
+    ina.s_addr = htonl(INADDR_LOOPBACK);
+    if (!TEST_true(BIO_new_bio_dgram_pair(&c_bio, 65535, &s_bio, 65535)))
+        goto err;
+    if (!TEST_ptr((server_addr = create_addr(&ina, SERVER_PORT)))
+        || (!TEST_ptr((client_addr = create_addr(&ina, CLIENT_PORT)))))
+        goto err;
+
+    if (!TEST_true(bio_addr_bind(c_bio, client_addr)))
+        goto err;
+    client_addr = NULL;
+
+    if (!TEST_true(bio_addr_bind(s_bio, server_addr)))
+        goto err;
+    shadow_server_addr = server_addr;
+    server_addr = NULL;
+
+    if (!TEST_ptr((listener = SSL_new_listener(sctx,
+                       SSL_LISTENER_FLAG_NO_VALIDATE)))
+        || (!TEST_true(SSL_listen(listener)))
+        || (!TEST_ptr((client = SSL_new(cctx))))
+        || (!TEST_true(SSL_set1_initial_peer_addr(client, shadow_server_addr)))
+        || (!TEST_int_eq(SSL_set_alpn_protos(client, alpn, sizeof(alpn)), 0))
+        || (!TEST_true(SSL_set_tlsext_host_name(client, "localhost")))
+        || (!TEST_ptr((cch = ossl_quic_conn_get_channel(client)))))
+        goto err;
+
+    SSL_set_bio(listener, s_bio, s_bio);
+    SSL_set_bio(client, c_bio, c_bio);
+
+    if (!TEST_true(SSL_set_blocking_mode(listener, 0)))
+        goto err;
+
+    if (!TEST_true(SSL_set_blocking_mode(client, 0)))
+        goto err;
+
+    /*
+     * Create a bogus qtx so that we can inject a crafted frame after the
+     * initial client and server hello are exchanged.
+     */
+    qtx_args.bio = SSL_get_wbio(client);
+    qtx_args.mdpl = QUIC_MDPL;
+    qtx_args.libctx = libctx;
+    inject_qtx = ossl_qtx_new(&qtx_args);
+    if (!TEST_ptr(inject_qtx))
+        goto err;
+
+    /*
+     * Install the initial secret to our bogus qtx so that our subsequent
+     * crafted frame gets accepted on the server channel.
+     */
+    hdr.type = QUIC_PKT_TYPE_INITIAL;
+    hdr.fixed = 1;
+    hdr.pn_len = 4;
+    hdr.version = QUIC_VERSION_1;
+    hdr.dst_conn_id = cch->init_dcid;
+    hdr.src_conn_id = cch->init_scid;
+    if (!TEST_true(ossl_quic_provide_initial_secret(libctx, NULL, &hdr.dst_conn_id,
+            0, NULL, inject_qtx)))
+        goto err;
+
+    /* This emits a valid, padded, one-datagram X25519 ClientHello. */
+    rc = SSL_connect(client);
+    if (rc > 0)
+        goto err;
+    ssl_err = SSL_get_error(client, rc);
+    if (ssl_err != SSL_ERROR_WANT_READ && ssl_err != SSL_ERROR_WANT_WRITE)
+        goto err;
+
+    /*
+     * Make sure that the client hello was received at the server
+     */
+    if (!wait_readable(s_bio, 1000)) {
+        TEST_info("timed out waiting for the ClientHello");
+        goto err;
+    }
+
+    /*
+     * Accept the new connection on the server
+     */
+    for (i = 0; i < 64 && server == NULL; ++i) {
+        ERR_clear_error();
+        if (!TEST_true(SSL_handle_events(listener)))
+            goto err;
+        server = SSL_accept_connection(listener, 0);
+        ERR_clear_error();
+    }
+    if (!TEST_ptr(server))
+        goto err;
+    sch = ossl_quic_conn_get_channel(server);
+    if (!TEST_ptr(sch))
+        goto err;
+
+    if (!TEST_true(SSL_set_blocking_mode(server, 0)))
+        goto err;
+
+    first_injected_pn = ossl_quic_tx_packetiser_get_next_pn(
+        cch->txp, QUIC_PN_SPACE_INITIAL);
+    TEST_info("next client Initial packet number: %llu",
+        (unsigned long long)first_injected_pn);
+
+    /* Count but never deliver the server flight to the QUIC client. */
+    if (!TEST_true(drain_server_output(c_bio, &server_bytes, &server_datagrams)))
+        goto err;
+
+    TEST_info("phase 1 complete: legitimate ClientHello credit exhausted");
+
+    /*
+     * At this point the client has sent 1200 bytes, and the server should respond
+     * with 3600 bytes of server hello/certificate data, which should drain
+     * out unvalidated credit on the server.
+     *
+     * Given that, send another 1200 byte packet from the client, containing
+     * a bunch of initial frames.  The server should respond to each of these
+     * with 3600 bytes of handshake data, just as it did above, but
+     * (if the server is honoring the 3x amplification limit, will stop after
+     * sending the first one.
+     */
+    if (!TEST_true(send_coalesced_initial(inject_qtx, &hdr, shadow_server_addr,
+            first_injected_pn)))
+        goto err;
+    TEST_info("phase 2: sent one 1200-byte datagram containing 31 Initials");
+
+    /*
+     * Tick our state machine, making the server send responses, and counting
+     * how many datagrams and bytes are received by the client
+     */
+    for (i = 0; i < 64; ++i) {
+        if (!TEST_true(SSL_handle_events(listener)))
+            goto err;
+        if (!TEST_true(SSL_handle_events(server)))
+            goto err;
+        drain_server_output(c_bio, &server_bytes, &server_datagrams);
+    }
+
+    TEST_info("client UDP payload:  %llu bytes in 2 datagrams",
+        (unsigned long long)client_bytes);
+    TEST_info("RFC 9000 ceiling:    %llu bytes",
+        (unsigned long long)rfc_ceiling);
+    TEST_info("server UDP payload:  %llu bytes in %llu datagrams",
+        (unsigned long long)server_bytes, (unsigned long long)server_datagrams);
+    TEST_info("amplification ratio: %.2fx",
+        (double)server_bytes / (double)client_bytes);
+    TEST_info("handshake complete:  %s",
+        sch->handshake_complete ? "yes" : "no");
+    TEST_info("bogus credit >100k:  %s",
+        ossl_quic_tx_packetiser_check_unvalidated_credit(sch->txp, 100000)
+            ? "yes"
+            : "no");
+
+    /*
+     * rfc_ceiling should be 7200 (3600 bytes for the first client hello
+     * and 3600 more for our bogus coalesced frame above).  Make sure we
+     * didn't receive more than that on the client
+     */
+    if (!TEST_uint64_t_le(server_bytes, rfc_ceiling))
+        goto err;
+
+    ret = 1;
+
+err:
+    ossl_qtx_free(inject_qtx);
+    SSL_free(server);
+    SSL_free(client);
+    SSL_free(listener);
+    SSL_CTX_free(cctx);
+    SSL_CTX_free(sctx);
+    BIO_ADDR_free(client_addr);
+    BIO_ADDR_free(server_addr);
+    return ret;
 }
 
 static SSL *quic_verify_ssl = NULL;
@@ -3077,6 +3945,86 @@ static int test_accept_stream(void)
 
     testresult = 1;
 err:
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(qlistener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
+
+/*
+ * Streams rejected by the incoming stream policy are never placed on the accept
+ * queue. Check that they are still garbage collected and that the peer is
+ * granted credit for another stream, so that a peer which keeps opening streams
+ * neither grows the stream map without bound nor exhausts its stream limit.
+ */
+static int test_reject_stream_gc(void)
+{
+    /* Comfortably more than the default initial stream limit of 100. */
+    static const int num_streams = 250;
+    SSL_CTX *cctx = NULL, *sctx = NULL;
+    SSL *clientssl = NULL, *serverssl = NULL, *qlistener = NULL;
+    SSL *streamssl = NULL;
+    QUIC_CHANNEL *ch;
+    QUIC_STREAM_MAP *qsm;
+    size_t written = 0;
+    int testresult = 0, ret, i;
+
+    if (!TEST_ptr(sctx = create_server_ctx())
+        || !TEST_ptr(cctx = create_client_ctx())
+        || !create_quic_ssl_objects(sctx, cctx, &qlistener, &clientssl))
+        goto err;
+
+    for (i = 0; i < 2; i++) {
+        ret = SSL_connect(clientssl);
+        if (!TEST_int_le(ret, 0)
+            || !TEST_int_eq(SSL_get_error(clientssl, ret),
+                SSL_ERROR_WANT_READ))
+            goto err;
+        SSL_handle_events(qlistener);
+    }
+
+    if (!TEST_ptr(serverssl = SSL_accept_connection(qlistener, 0))
+        || !TEST_true(create_bare_ssl_connection(serverssl, clientssl,
+            SSL_ERROR_NONE, 0, 0))
+        || !TEST_true(SSL_set_incoming_stream_policy(clientssl,
+            SSL_INCOMING_STREAM_POLICY_REJECT, 42))
+        || !TEST_ptr(ch = ossl_quic_conn_get_channel(clientssl)))
+        goto err;
+
+    qsm = ossl_quic_channel_get_qsm(ch);
+
+    for (i = 0; i < num_streams; i++) {
+        if (!TEST_ptr(streamssl = SSL_new_stream(serverssl, 0))
+            || !TEST_true(SSL_write_ex(streamssl, "x", 1, &written)))
+            goto err;
+        SSL_free(streamssl);
+        streamssl = NULL;
+
+        /*
+         * Let the client reject the stream and the server pick up both the
+         * resulting frames and the MAX_STREAMS credit they release.
+         */
+        if (!TEST_int_eq(SSL_handle_events(clientssl), 1)
+            || !TEST_int_eq(SSL_handle_events(serverssl), 1)
+            || !TEST_int_eq(SSL_handle_events(clientssl), 1))
+            goto err;
+    }
+
+    /*
+     * Every rejected stream should have been collected by now, so the map must
+     * not have grown in proportion to the number of streams opened.
+     */
+    if (!TEST_size_t_lt(OPENSSL_LH_num_items((OPENSSL_LHASH *)qsm->map),
+            (size_t)num_streams / 10)
+        || !TEST_size_t_eq(SSL_get_accept_stream_queue_len(clientssl), 0))
+        goto err;
+
+    testresult = 1;
+err:
+    SSL_free(streamssl);
     SSL_free(serverssl);
     SSL_free(clientssl);
     SSL_free(qlistener);
@@ -3326,6 +4274,147 @@ static int test_quic_peer_addr_v6(void)
 }
 #endif
 
+/*
+ * Advance the fake clock to the next QUIC timer event when both endpoints are
+ * idle, consuming no real time.
+ */
+static void quic_advance_time(SSL *clientssl, SSL *serverssl)
+{
+    struct timeval tv;
+    int inf = 0;
+    OSSL_TIME delay = ossl_time_infinite(), t;
+
+    /* If there is data waiting to be processed, do not wait - tick instead. */
+    if (BIO_pending(SSL_get_rbio(clientssl)) > 0)
+        return;
+
+    if (SSL_get_event_timeout(clientssl, &tv, &inf) && !inf) {
+        t = ossl_time_from_timeval(tv);
+        if (ossl_time_compare(t, delay) < 0)
+            delay = t;
+    }
+    if (SSL_get_event_timeout(serverssl, &tv, &inf) && !inf) {
+        t = ossl_time_from_timeval(tv);
+        if (ossl_time_compare(t, delay) < 0)
+            delay = t;
+    }
+
+    if (!ossl_time_is_infinite(delay))
+        fake_now = ossl_time_add(fake_now, delay);
+}
+
+static int test_quic_handshake_multipkt_mfail(void)
+{
+    SSL_CTX *cctx = NULL, *sctx = NULL;
+    SSL *clientssl = NULL, *serverssl = NULL, *qlistener = NULL;
+    QUIC_CHANNEL *sch = NULL, *cch = NULL;
+    int ret = 0, rc = 0, err, i;
+
+    if (!TEST_ptr(sctx = create_server_ctx())
+        || !TEST_ptr(cctx = create_client_ctx()))
+        goto err;
+
+    if (!create_quic_ssl_objects_ex(sctx, cctx, NULL,
+            &qlistener, &clientssl, 1))
+        goto err;
+
+    if (!TEST_true(SSL_set_tlsext_host_name(clientssl, "localhost")))
+        goto err;
+
+    /* Get the listener to bind a channel we can accept. */
+    for (i = 0; i < 10; i++) {
+        rc = SSL_connect(clientssl);
+        if (rc <= 0) {
+            err = SSL_get_error(clientssl, rc);
+            if (!TEST_true(err == SSL_ERROR_WANT_READ
+                    || err == SSL_ERROR_WANT_WRITE))
+                goto err;
+        }
+        SSL_handle_events(qlistener);
+
+        serverssl = SSL_accept_connection(qlistener, 0);
+        if (serverssl != NULL)
+            break;
+    }
+    if (!TEST_ptr(serverssl)
+        || !TEST_false(SSL_is_init_finished(serverssl)))
+        goto err;
+
+    if (!TEST_ptr(sch = ossl_quic_conn_get_channel(serverssl)))
+        goto err;
+
+    /* Do handshake until the server reaches the first flight. */
+    for (i = 0; i < 10; i++) {
+        rc = SSL_do_handshake(clientssl);
+        if (rc <= 0) {
+            err = SSL_get_error(clientssl, rc);
+            if (!TEST_true(err == SSL_ERROR_WANT_READ
+                    || err == SSL_ERROR_WANT_WRITE))
+                goto err;
+        }
+        if (ossl_quic_channel_is_term_any(sch))
+            goto err;
+        SSL_handle_events(serverssl);
+        if (sch->tx_enc_level >= QUIC_ENC_LEVEL_HANDSHAKE)
+            break;
+        quic_advance_time(clientssl, serverssl);
+    }
+    if (!TEST_int_lt(i, 10))
+        goto err;
+
+    /* Process the multi-packet datagram under mfail. */
+    MFAIL_start();
+    rc = SSL_do_handshake(clientssl);
+    MFAIL_end();
+
+    /* A fatal injected failure may terminate the connection - bail if so. */
+    if (rc <= 0) {
+        err = SSL_get_error(clientssl, rc);
+        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
+            goto err;
+    }
+
+    if (!TEST_ptr(cch = ossl_quic_conn_get_channel(clientssl)))
+        goto err;
+
+    /* Connection still live so get the handshake to converge. */
+    for (i = 0; i < 10; i++) {
+        rc = SSL_do_handshake(clientssl);
+        if (rc == 1)
+            break;
+
+        err = SSL_get_error(clientssl, rc);
+        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
+            ret = -1;
+            goto err;
+        }
+
+        if (ossl_quic_channel_is_term_any(cch)
+            || ossl_quic_channel_is_term_any(sch))
+            goto err;
+
+        SSL_handle_events(serverssl);
+        quic_advance_time(clientssl, serverssl);
+    }
+    if (!TEST_int_lt(i, 10)) {
+        ret = is_fips && fips_provider_version_match(libctx, ">=3.5.0 <4.1.0")
+            ? 0
+            : -1;
+        goto err;
+    }
+
+    ret = 1;
+
+err:
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(qlistener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+
+    return ret;
+}
+
 /* Test ECH with quic */
 static int test_ech(void)
 {
@@ -3485,6 +4574,152 @@ end:
     return ret;
 }
 
+static int test_ssl_new_mfail(void)
+{
+    int ret = 0;
+    SSL_CTX *cctx = NULL;
+    SSL *clientquic = NULL;
+
+    if (!TEST_ptr(cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method())))
+        goto err;
+
+    MFAIL_start();
+    clientquic = SSL_new(cctx);
+    MFAIL_end();
+
+    if (clientquic != NULL)
+        ret = 1;
+
+err:
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+
+    return ret;
+}
+
+#define PENDING_LIMIT 5
+#define HANDSHAKE_STEPS 10
+static int test_pending_limit(void)
+{
+    SSL_CTX *cctx = NULL, *sctx = NULL;
+    SSL *clientssl = NULL, *serverssl_listener = NULL, *serverssl = NULL;
+    SSL *extra_clients[PENDING_LIMIT * 2] = { NULL };
+    BIO *bio;
+    unsigned int i, handshake_step;
+    int done;
+    int testresult = 0;
+    int ok;
+    QUIC_PORT *port;
+    size_t pending_connections = 0;
+
+    if (!TEST_true(create_quic_ctx_pair(libctx, &cctx, &sctx, cert, privkey)))
+        return 0;
+
+    if (!TEST_true(create_quic_conn_objects(cctx, sctx, &clientssl, &serverssl_listener)))
+        goto end;
+
+    ok = SSL_set_generic_value_uint(serverssl_listener,
+        SSL_VALUE_QUIC_MAX_PENDING_CONNS, PENDING_LIMIT);
+    if (!TEST_true(ok)) {
+        TEST_info("%s call to SSL_set_generic_request_uint"
+                  "(SSL_VALUE_QUIC_MAX_PENDING_CONNS failed",
+            OPENSSL_FUNC);
+        goto end;
+    }
+
+    if (!TEST_true(SSL_listen(serverssl_listener))) {
+        TEST_info("%s SSL_listen() failed", OPENSSL_FUNC);
+        goto end;
+    }
+
+    port = ossl_quic_listener_get_port(serverssl_listener);
+    if (!TEST_ptr(port))
+        goto end;
+
+    bio = SSL_get_rbio(clientssl);
+    if (!TEST_ptr(bio))
+        goto end;
+
+    if (!TEST_ptr_eq(bio, SSL_get_wbio(clientssl)))
+        goto end;
+
+    for (i = 0; i < OSSL_NELEM(extra_clients); i++) {
+        extra_clients[i] = create_quic_client(cctx, bio);
+        if (!TEST_ptr(extra_clients[i]))
+            goto end;
+    }
+
+    for (i = 0; i < PENDING_LIMIT; i++) {
+        handshake_step = 0;
+        done = 0;
+        while (!done && handshake_step++ < HANDSHAKE_STEPS) {
+            /*
+             * connections are never accepted by the server. The SSL_connect()
+             * for non-blocking client returns -1 to keep connect retrying
+             */
+            if (!TEST_int_lt(SSL_connect(extra_clients[i]), 0))
+                goto end;
+            SSL_handle_events(serverssl_listener);
+            pending_connections = ossl_quic_port_get_num_incoming_channels(port);
+            done = (pending_connections == (i + 1));
+        }
+    }
+
+    if (!TEST_size_t_eq(pending_connections, PENDING_LIMIT))
+        goto end;
+
+    /*
+     * initiate yet another connection. The connection must not be inserted
+     * to pending queue. The pending_connections must be 5.
+     */
+    for (i = PENDING_LIMIT; i < OSSL_NELEM(extra_clients); i++) {
+        handshake_step = 0;
+        done = 0;
+        while (!done && handshake_step++ < HANDSHAKE_STEPS) {
+            /*
+             * connections are never accepted by the server. The SSL_connect()
+             * for non-blocking client returns -1 to keep connect retrying
+             */
+            if (!TEST_int_le(SSL_connect(extra_clients[i]), 0))
+                goto end;
+            SSL_handle_events(serverssl_listener);
+            pending_connections = ossl_quic_port_get_num_incoming_channels(port);
+            done = (pending_connections == (i + 1));
+        }
+    }
+    pending_connections = ossl_quic_port_get_num_incoming_channels(port);
+    if (!TEST_size_t_eq(pending_connections, PENDING_LIMIT))
+        goto end;
+
+    /*
+     * accept one connection and check the length of the queue dropped to 4.
+     */
+    done = 0;
+    handshake_step = 0;
+    while (!done && handshake_step++ < HANDSHAKE_STEPS) {
+        if (!TEST_int_lt(SSL_connect(extra_clients[0]), 0))
+            goto end;
+        SSL_handle_events(serverssl_listener);
+        serverssl = SSL_accept_connection(serverssl_listener, 0);
+        done = (serverssl != NULL);
+    }
+    pending_connections = ossl_quic_port_get_num_incoming_channels(port);
+    if (!TEST_size_t_eq(pending_connections, PENDING_LIMIT - 1))
+        goto end;
+
+    testresult = 1;
+end:
+    for (i = 0; i < OSSL_NELEM(extra_clients); i++)
+        SSL_free(extra_clients[i]);
+    SSL_free(clientssl);
+    SSL_free(serverssl);
+    SSL_free(serverssl_listener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
+
 /***********************************************************************************/
 OPT_TEST_DECLARE_USAGE("provider config certsdir datadir\n")
 
@@ -3554,6 +4789,7 @@ int setup_tests(void)
         goto err;
 
     ADD_ALL_TESTS(test_quic_write_read, 3);
+    ADD_MFAIL_NO_CHECK_TEST(test_ssl_read_key_update_mfail);
     ADD_TEST(test_fin_only_blocking);
     ADD_TEST(test_ciphersuites);
     ADD_TEST(test_cipher_find);
@@ -3567,6 +4803,8 @@ int setup_tests(void)
     ADD_ALL_TESTS(test_quic_set_fd, 3);
     ADD_TEST(test_bio_ssl);
     ADD_TEST(test_ssl_listen_ex);
+    ADD_TEST(test_ssl_listen_ex_teardown);
+    ADD_MFAIL_NO_CHECK_TEST(test_ssl_listen_ex_mfail);
     ADD_TEST(test_ssl_client_as_ossl_quic_method);
     ADD_TEST(test_back_pressure);
     ADD_TEST(test_multiple_dgrams);
@@ -3582,20 +4820,26 @@ int setup_tests(void)
     ADD_TEST(test_domain_flags);
     ADD_TEST(test_early_ticks);
     ADD_TEST(test_ssl_new_from_listener);
+    ADD_TEST(test_ssl_new_from_listener_user_ssl);
 #ifndef OPENSSL_NO_SSL_TRACE
     ADD_TEST(test_new_token);
 #endif
     ADD_TEST(test_server_method_with_ssl_new);
     ADD_TEST(test_ssl_accept_connection);
+    ADD_TEST(test_quic_amplification_limit);
     ADD_TEST(test_ssl_set_verify);
     ADD_TEST(test_accept_stream);
+    ADD_TEST(test_reject_stream_gc);
     ADD_TEST(test_client_hello_retry);
 #if OPENSSL_USE_IPV6
     ADD_TEST(test_quic_peer_addr_v6);
 #endif
     ADD_TEST(test_quic_peer_addr_v4);
+    ADD_MFAIL_NO_CHECK_TEST(test_quic_handshake_multipkt_mfail);
     ADD_TEST(test_ech);
     ADD_TEST(test_quic_resize_txe);
+    ADD_MFAIL_TEST(test_ssl_new_mfail);
+    ADD_TEST(test_pending_limit);
 
     return 1;
 err:

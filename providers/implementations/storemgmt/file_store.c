@@ -9,6 +9,7 @@
 
 /* This file has quite some overlap with engines/e_loader_attic.c */
 
+#include <stdio.h>
 #include <string.h>
 #include "internal/e_os.h" /* for stat() */
 #include <sys/stat.h> /* for struct stat */
@@ -368,7 +369,7 @@ static int file_set_ctx_params(void *loaderctx, const OSSL_PARAM params[])
         hash = X509_NAME_hash_ex(x509_name,
             ossl_prov_ctx_get0_libctx(ctx->provctx), NULL,
             &ok);
-        BIO_snprintf(ctx->_.dir.search_name, sizeof(ctx->_.dir.search_name),
+        snprintf(ctx->_.dir.search_name, sizeof(ctx->_.dir.search_name),
             "%08lx", hash);
     end:
         X509_NAME_free(x509_name);
@@ -505,7 +506,7 @@ static int file_setup_decoders(struct file_ctx_st *ctx)
              * The decoder doesn't need any identification or to be
              * attached to any provider, since it's only used locally.
              */
-            to_obj = ossl_decoder_from_algorithm(0, to_algo, NULL);
+            to_obj = ossl_decoder_from_algorithm(0, to_algo, NULL, 0);
             if (to_obj != NULL)
                 to_obj_inst = ossl_decoder_instance_new_forprov(to_obj, ctx->provctx,
                     input_structure);
@@ -586,7 +587,8 @@ static int file_load_file(struct file_ctx_st *ctx,
 
     data.object_cb = object_cb;
     data.object_cbarg = object_cbarg;
-    OSSL_DECODER_CTX_set_construct_data(ctx->_.file.decoderctx, &data);
+    if (!OSSL_DECODER_CTX_set_construct_data(ctx->_.file.decoderctx, &data))
+        return 0;
     OSSL_DECODER_CTX_set_passphrase_cb(ctx->_.file.decoderctx, pw_cb, pw_cbarg);
 
     /* Launch */
@@ -610,22 +612,12 @@ static int file_load_file(struct file_ctx_st *ctx,
 
 static char *file_name_to_uri(struct file_ctx_st *ctx, const char *name)
 {
-    char *data = NULL;
+    const char *pathsep = ossl_ends_with_dirsep(ctx->uri) ? "" : "/";
+    char *data;
 
     assert(name != NULL);
-    {
-        const char *pathsep = ossl_ends_with_dirsep(ctx->uri) ? "" : "/";
-        size_t calculated_length = strlen(ctx->uri) + strlen(pathsep)
-            + strlen(name) + 1 /* \0 */;
-
-        data = OPENSSL_zalloc(calculated_length);
-        if (data == NULL)
-            return NULL;
-
-        OPENSSL_strlcat(data, ctx->uri, calculated_length);
-        OPENSSL_strlcat(data, pathsep, calculated_length);
-        OPENSSL_strlcat(data, name, calculated_length);
-    }
+    if (ossl_asprintf(&data, "%s%s%s", ctx->uri, pathsep, name) < 0)
+        return NULL;
     return data;
 }
 

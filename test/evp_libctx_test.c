@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2025 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2020-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -347,7 +347,7 @@ err:
 
 static int test_cipher_reinit(int test_id)
 {
-    int ret = 0, diff, ccm, siv, no_null_key;
+    int ret = 0, diff, siv, no_null_key;
     int out1_len = 0, out2_len = 0, out3_len = 0;
     EVP_CIPHER *cipher = NULL;
     EVP_CIPHER_CTX *ctx = NULL;
@@ -359,70 +359,13 @@ static int test_cipher_reinit(int test_id)
         0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10
     };
     unsigned char key[64] = {
-        0x00,
-        0x01,
-        0x02,
-        0x03,
-        0x04,
-        0x05,
-        0x06,
-        0x07,
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
-        0x01,
-        0x01,
-        0x02,
-        0x03,
-        0x04,
-        0x05,
-        0x06,
-        0x07,
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
-        0x02,
-        0x01,
-        0x02,
-        0x03,
-        0x04,
-        0x05,
-        0x06,
-        0x07,
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
-        0x03,
-        0x01,
-        0x02,
-        0x03,
-        0x04,
-        0x05,
-        0x06,
-        0x07,
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+        0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x01, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+        0x0e, 0x0f, 0x02, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x03, 0x01,
+        0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f
     };
     unsigned char iv[48] = {
         0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08,
@@ -434,15 +377,18 @@ static int test_cipher_reinit(int test_id)
     };
     const char *name = sk_OPENSSL_STRING_value(cipher_names, test_id);
 
-    if (!TEST_ptr(ctx = EVP_CIPHER_CTX_new()))
-        goto err;
-
     TEST_note("Fetching %s\n", name);
     if (!TEST_ptr(cipher = EVP_CIPHER_fetch(libctx, name, NULL)))
         goto err;
 
-    /* ccm fails on the second update - this matches OpenSSL 1_1_1 behaviour */
-    ccm = (EVP_CIPHER_get_mode(cipher) == EVP_CIPH_CCM_MODE);
+    if (fips_provider_version_match(libctx, "<4.2.0")
+        && EVP_CIPHER_get_mode(cipher) == EVP_CIPH_CCM_MODE) {
+        EVP_CIPHER_free(cipher);
+        return TEST_skip("CCM modes do not support reinit with old providers");
+    }
+
+    if (!TEST_ptr(ctx = EVP_CIPHER_CTX_new()))
+        goto err;
 
     /* siv cannot be called with NULL key as the iv is irrelevant */
     siv = (EVP_CIPHER_get_mode(cipher) == EVP_CIPH_SIV_MODE);
@@ -460,25 +406,22 @@ static int test_cipher_reinit(int test_id)
     if (!TEST_true(EVP_EncryptInit_ex(ctx, cipher, NULL, key, iv))
         || !TEST_true(EVP_EncryptUpdate(ctx, out1, &out1_len, in, sizeof(in)))
         || !TEST_true(EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv))
-        || !TEST_int_eq(EVP_EncryptUpdate(ctx, out2, &out2_len, in, sizeof(in)),
-            ccm ? 0 : 1)
+        || !TEST_true(EVP_EncryptUpdate(ctx, out2, &out2_len, in, sizeof(in)))
         || (!no_null_key
             && (!TEST_true(EVP_EncryptInit_ex(ctx, NULL, NULL, NULL, iv))
                 || !TEST_int_eq(EVP_EncryptUpdate(ctx, out3, &out3_len, in, sizeof(in)),
-                    ccm || siv ? 0 : 1))))
+                    siv ? 0 : 1))))
         goto err;
 
-    if (ccm == 0) {
-        if (diff) {
-            if (!TEST_mem_ne(out1, out1_len, out2, out2_len)
-                || !TEST_mem_ne(out1, out1_len, out3, out3_len)
-                || !TEST_mem_ne(out2, out2_len, out3, out3_len))
-                goto err;
-        } else {
-            if (!TEST_mem_eq(out1, out1_len, out2, out2_len)
-                || (!siv && !no_null_key && !TEST_mem_eq(out1, out1_len, out3, out3_len)))
-                goto err;
-        }
+    if (diff) {
+        if (!TEST_mem_ne(out1, out1_len, out2, out2_len)
+            || !TEST_mem_ne(out1, out1_len, out3, out3_len)
+            || !TEST_mem_ne(out2, out2_len, out3, out3_len))
+            goto err;
+    } else {
+        if (!TEST_mem_eq(out1, out1_len, out2, out2_len)
+            || (!siv && !no_null_key && !TEST_mem_eq(out1, out1_len, out3, out3_len)))
+            goto err;
     }
     ret = 1;
 err:
@@ -503,104 +446,19 @@ static int test_cipher_reinit_partialupdate(int test_id)
     unsigned char out2[256];
     unsigned char out3[256];
     static const unsigned char in[32] = {
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
-        0xba,
-        0xbe,
-        0xba,
-        0xbe,
-        0x00,
-        0x00,
-        0xba,
-        0xbe,
-        0x01,
-        0x01,
-        0x02,
-        0x03,
-        0x04,
-        0x05,
-        0x06,
-        0x07,
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0xba, 0xbe,
+        0xba, 0xbe, 0x00, 0x00, 0xba, 0xbe, 0x01, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+        0x0e, 0x0f
     };
     static const unsigned char key[64] = {
-        0x00,
-        0x01,
-        0x02,
-        0x03,
-        0x04,
-        0x05,
-        0x06,
-        0x07,
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
-        0x01,
-        0x01,
-        0x02,
-        0x03,
-        0x04,
-        0x05,
-        0x06,
-        0x07,
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
-        0x02,
-        0x01,
-        0x02,
-        0x03,
-        0x04,
-        0x05,
-        0x06,
-        0x07,
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
-        0x03,
-        0x01,
-        0x02,
-        0x03,
-        0x04,
-        0x05,
-        0x06,
-        0x07,
-        0x08,
-        0x09,
-        0x0a,
-        0x0b,
-        0x0c,
-        0x0d,
-        0x0e,
-        0x0f,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+        0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x01, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+        0x0e, 0x0f, 0x02, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x03, 0x01,
+        0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f
     };
     static const unsigned char iv[48] = {
         0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08,

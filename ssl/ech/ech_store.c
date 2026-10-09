@@ -1,7 +1,7 @@
 /*
  * Copyright 2024-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
@@ -254,6 +254,10 @@ static int ech_final_config_checks(OSSL_ECHSTORE_ENTRY *ee)
     char *lastlabel = NULL;
     size_t lllen;
 
+    if (vpm == NULL) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
     /* check local support for some suite */
     for (ind = 0; ind != (int)ee->nsuites; ind++) {
         /*

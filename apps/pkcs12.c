@@ -157,9 +157,9 @@ const OPTIONS pkcs12_options[] = {
     { OPT_MORE_STR, 0, 0,
         "which is the 1st cert from -in matching the private key (if given)" },
     { "untrusted", OPT_UNTRUSTED, '<', "Untrusted certificates for chain building" },
-    { "CAfile", OPT_CAFILE, '<', "PEM-format file of CA's" },
-    { "CApath", OPT_CAPATH, '/', "PEM-format directory of CA's" },
-    { "CAstore", OPT_CASTORE, ':', "URI to store of CA's" },
+    { "CAfile", OPT_CAFILE, '<', "File in PEM format with trusted CA certs" },
+    { "CApath", OPT_CAPATH, '/', "Dir with trusted CA cert files in PEM format" },
+    { "CAstore", OPT_CASTORE, ':', "URI of store with trusted CA certs" },
     { "no-CAfile", OPT_NOCAFILE, '-',
         "Do not load the default certificates file" },
     { "no-CApath", OPT_NOCAPATH, '-',
@@ -833,7 +833,7 @@ int pkcs12_main(int argc, char **argv)
                     ASN1_INTEGER_get(pbkdf2_param->iter));
                 BIO_printf(bio_err, "Key length: %ld, Salt length: %d\n",
                     ASN1_INTEGER_get(pbkdf2_param->keylength),
-                    ASN1_STRING_length(pbkdf2_param->salt->value.octet_string));
+                    (int)ASN1_STRING_get_length(pbkdf2_param->salt->value.octet_string));
                 if (pbkdf2_param->prf == NULL) {
                     prfnid = NID_hmacWithSHA1;
                 } else {
@@ -847,8 +847,8 @@ int pkcs12_main(int argc, char **argv)
             BIO_printf(bio_err, ", Iteration %ld\n",
                 tmaciter != NULL ? ASN1_INTEGER_get(tmaciter) : 1L);
             BIO_printf(bio_err, "MAC length: %ld, salt length: %ld\n",
-                tmac != NULL ? ASN1_STRING_length(tmac) : 0L,
-                tsalt != NULL ? ASN1_STRING_length(tsalt) : 0L);
+                tmac != NULL ? (long)ASN1_STRING_get_length(tmac) : 0L,
+                tsalt != NULL ? (long)ASN1_STRING_get_length(tsalt) : 0L);
         }
     }
 
@@ -1036,6 +1036,51 @@ int dump_certs_pkeys_bags(BIO *out, const STACK_OF(PKCS12_SAFEBAG) *bags,
     return 1;
 }
 
+static int extract_symmetric_key(BIO *out, const PKCS12_SAFEBAG *bag,
+    const char *pass, int passlen, int options, const EVP_CIPHER *enc)
+{
+    PKCS8_PRIV_KEY_INFO *p8;
+    EVP_SKEY *skey = NULL;
+
+    if (options & NOKEYS)
+        return 1;
+
+    p8 = PKCS12_decrypt_secretbag(bag, pass, passlen,
+        app_get0_libctx(), app_get0_propq());
+    if (p8 == NULL)
+        return 0;
+    skey = PKCS8_PRIV_KEY_INFO_get1_skey(p8, app_get0_libctx(),
+        app_get0_propq(), NULL, 0);
+    PKCS8_PRIV_KEY_INFO_free(p8);
+    if (skey == NULL)
+        return 0;
+    if (enc == NULL) {
+        const unsigned char *kdata = NULL;
+        size_t klen = 0;
+
+        EVP_SKEY_get0_raw_key(skey, &kdata, &klen);
+
+        if (kdata != NULL && klen > 0) {
+            BIO_puts(bio_err, "Bag Value: ");
+            BIO_puts(out, "\n    Key Data: ");
+            hex_print(out, kdata, (int)klen);
+
+            BIO_printf(bio_err, "    Key management: %s\n", EVP_SKEY_get0_skeymgmt_name(skey));
+            BIO_printf(bio_err, "    Key Length: %zu bytes\n", klen);
+        } else {
+            BIO_printf(bio_err, "Error obtaining key bytes\n");
+            EVP_SKEY_free(skey);
+            return 0;
+        }
+    } else {
+        BIO_puts(bio_err, "Bag Value: ");
+        print_attribute(out, PKCS12_SAFEBAG_get0_bag_obj(bag));
+    }
+
+    EVP_SKEY_free(skey);
+    return 1;
+}
+
 int dump_certs_pkeys_bag(BIO *out, const PKCS12_SAFEBAG *bag,
     const char *pass, int passlen, int options,
     char *pempass, const EVP_CIPHER *enc)
@@ -1115,8 +1160,12 @@ int dump_certs_pkeys_bag(BIO *out, const PKCS12_SAFEBAG *bag,
         print_attribs(out, attrs, "Bag Attributes");
         BIO_puts(bio_err, "Bag Type: ");
         i2a_ASN1_OBJECT(bio_err, PKCS12_SAFEBAG_get0_bag_type(bag));
-        BIO_puts(bio_err, "\nBag Value: ");
-        print_attribute(out, PKCS12_SAFEBAG_get0_bag_obj(bag));
+        BIO_puts(bio_err, "\n");
+
+        if (PKCS12_SAFEBAG_get_bag_nid(bag) == NID_pkcs8ShroudedKeyBag)
+            return extract_symmetric_key(out, bag, pass, passlen, options, enc);
+        else
+            print_attribute(out, PKCS12_SAFEBAG_get0_bag_obj(bag));
         return 1;
 
     case NID_safeContentsBag:
@@ -1231,7 +1280,7 @@ static int alg_print(const X509_ALGOR *alg)
             }
             BIO_printf(bio_err, ", Salt length: %d, Cost(N): %ld, "
                                 "Block size(r): %ld, Parallelism(p): %ld",
-                ASN1_STRING_length(kdf->salt),
+                (int)ASN1_STRING_get_length(kdf->salt),
                 ASN1_INTEGER_get(kdf->costParameter),
                 ASN1_INTEGER_get(kdf->blockSize),
                 ASN1_INTEGER_get(kdf->parallelizationParameter));
@@ -1282,25 +1331,27 @@ void print_attribute(BIO *out, const ASN1_TYPE *av)
     switch (av->type) {
     case V_ASN1_BMPSTRING:
         value = OPENSSL_uni2asc(ASN1_STRING_get0_data(av->value.bmpstring),
-            ASN1_STRING_length(av->value.bmpstring));
+            (int)ASN1_STRING_get_length(av->value.bmpstring));
         BIO_printf(out, "%s\n", value);
         OPENSSL_free(value);
         break;
 
     case V_ASN1_UTF8STRING:
-        BIO_printf(out, "%.*s\n", ASN1_STRING_length(av->value.utf8string),
-            ASN1_STRING_get0_data(av->value.utf8string));
+        BIO_printf(out, "%.*s\n", (int)ASN1_STRING_get_length(av->value.utf8string),
+            ASN1_STRING_get_length(av->value.utf8string)
+                ? ASN1_STRING_get0_data(av->value.utf8string)
+                : (const unsigned char *)"");
         break;
 
     case V_ASN1_OCTET_STRING:
         hex_print(out, ASN1_STRING_get0_data(av->value.octet_string),
-            ASN1_STRING_length(av->value.octet_string));
+            (int)ASN1_STRING_get_length(av->value.octet_string));
         BIO_puts(out, "\n");
         break;
 
     case V_ASN1_BIT_STRING:
         hex_print(out, ASN1_STRING_get0_data(av->value.bit_string),
-            ASN1_STRING_length(av->value.bit_string));
+            (int)ASN1_STRING_get_length(av->value.bit_string));
         BIO_puts(out, "\n");
         break;
 

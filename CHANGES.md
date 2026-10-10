@@ -121,6 +121,16 @@ OpenSSL 4.2
 
    *Paul Grubbs*
 
+ * Added optimized ML-KEM NTT and scalar multiplication operations on `s390x`
+   (with potential reuse for other architectures with 128 bit vector registers).
+
+   *Timo Keller*
+
+ * Added optimized ML-DSA NTT and scalar multiplication operations on `s390x`
+   (with potential reuse for other architectures with 128 bit vector registers).
+
+   *Timo Keller*
+
 OpenSSL 4.1
 -----------
 
@@ -687,11 +697,6 @@ OpenSSL 4.1
    <!-- https://github.com/openssl/openssl/pull/30446 -->
 
    *Tomáš Mráz*
-
- * Added optimized ML-KEM NTT and scalar multiplication operations on `s390x`
-   (with potential reuse for other architectures with 128 bit vector registers).
-
-   *Timo Keller*
 
 OpenSSL 4.0
 -----------
@@ -1745,8 +1750,9 @@ OpenSSL 4.0
 
    *Bob Beck*
 
- * Added `OSSL_CMP_OPT_PERMIT_TA_IN_EXTRACERTS_FOR_IR` option for `OSSL_CMP_CTX`
-   and a corresponding `-ta_in_ip_extracert` option for the `openssl cmp` command.
+ * Added a `-ta_in_ip_extracert` option for the `openssl cmp` command, that sets
+   `OSSL_CMP_OPT_PERMIT_TA_IN_EXTRACERTS_FOR_IR` option for the `OSSL_CMP_CTX`
+   object.
 
    This work was sponsored by Siemens AG.
 
